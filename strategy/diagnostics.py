@@ -12,6 +12,7 @@ FIELDS = [
     "close_15m", "ema_15m", "rsi_15m", "roc_15m", "adx_15m",
     "bull_direction_ok", "bear_direction_ok", "vwap_bull", "vwap_bear", "breakout_bull", "breakout_bear",
     "trend_continuation_bull", "trend_continuation_bear",
+    "market_state", "market_bull_confidence", "market_bear_confidence", "market_state_reasons",
 ]
 
 

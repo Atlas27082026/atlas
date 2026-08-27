@@ -10,6 +10,7 @@ from strategy.indicators import latest_completed_candle
 from strategy.model_breakout import evaluate_breakout
 from strategy.model_vwap import evaluate_vwap_pullback
 from strategy.model_trend_continuation import evaluate_trend_continuation
+from strategy.market_state import evaluate_market_state
 from strategy.settings import StrategySettings
 
 
@@ -91,6 +92,7 @@ class SignalEngine:
         bo_bear = evaluate_breakout(df_5m, c5.index, "BEAR", self.settings)
         tc_bull = evaluate_trend_continuation(df_5m, c5.index, row15, "BULL", self.settings)
         tc_bear = evaluate_trend_continuation(df_5m, c5.index, row15, "BEAR", self.settings)
+        market_state = evaluate_market_state(df_5m, c5.index, df_15m, c15.index, self.settings)
 
         bull_model = (
             "VWAP_PULLBACK" if vwap_bull.passed else
@@ -163,6 +165,10 @@ class SignalEngine:
             "breakout_bear": bo_bear.passed,
             "trend_continuation_bull": tc_bull.passed,
             "trend_continuation_bear": tc_bear.passed,
+            "market_state": market_state.state,
+            "market_bull_confidence": market_state.bull_confidence,
+            "market_bear_confidence": market_state.bear_confidence,
+            "market_state_reasons": "|".join(market_state.reasons),
             "entry_trigger_bull_details": {
                 "direction_ok": bull_direction_ok,
                 "vwap": vwap_bull.details,
