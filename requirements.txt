@@ -1,0 +1,7 @@
+Dhan-Tradehull
+dhanhq>=2.1.0
+pandas
+numpy
+ta-lib
+rich
+PyYAML

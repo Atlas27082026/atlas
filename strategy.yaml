@@ -1,0 +1,70 @@
+strategy:
+  indicators:
+    ema_5m: 21
+    ema_15m: 21
+    rsi_period: 14
+    roc_period: 12
+    adx_period: 14
+    supertrend_period: 7
+    supertrend_multiplier: 3.0
+    rvol_lookback: 20
+
+  macro:
+    adx_min: 22.0
+    rsi_bull_min: 50.0
+    rsi_bear_max: 50.0
+
+  direction:
+    rsi_bull_min_5m: 55.0
+    rsi_bear_max_5m: 45.0
+
+  rvol:
+    morning:
+      start: "09:15"
+      end: "10:30"
+      minimum: 1.20
+    midday:
+      start: "10:30"
+      end: "13:30"
+      minimum: 1.05
+    afternoon:
+      start: "13:30"
+      end: "14:45"
+      minimum: 1.10
+
+  vwap_pullback:
+    enabled: true
+    touch_upper_pct: 0.0015
+    touch_lower_pct: 0.0030
+    require_weekly_alignment: true
+    bullish_max_upper_wick_ratio: 0.55
+    bearish_max_lower_wick_ratio: 0.55
+
+  breakout:
+    enabled: true
+    lookback_bars: 4
+    max_consolidation_range_pct: 0.006
+    breakout_buffer_pct: 0.0005
+    require_weekly_alignment: true
+
+
+  trend_continuation:
+    enabled: true
+    lookback_bars: 3
+    min_adx_15m: 25.0
+    min_body_atr: 0.20
+    max_ema_extension_atr: 1.75
+    min_close_location: 0.60
+    rsi_bull_min: 55.0
+    rsi_bull_max: 74.0
+    rsi_bear_min: 26.0
+    rsi_bear_max: 45.0
+
+  scoring:
+    near_signal_pct: 80.0
+    weights:
+      macro: 20
+      supertrend: 20
+      weekly_vwap: 20
+      rvol: 20
+      entry_trigger: 20
