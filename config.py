@@ -3,20 +3,32 @@ from pathlib import Path
 from typing import List
 import os
 
+from dotenv import load_dotenv
+
 
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
 STATE_DIR = BASE_DIR / "state"
 DATA_DIR = BASE_DIR / "runtime_data"
+DOTENV_PATH = BASE_DIR / ".env"
+
+load_dotenv(dotenv_path=DOTENV_PATH, override=False)
+
+
+def _required_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required credential environment variable: {name}")
+    return value
 
 
 @dataclass(frozen=True)
 class CredentialsConfig:
-    client_code: str = os.getenv("CLIENT_CODE", "") 
-    pin: str = os.getenv("PIN", "") 
-    totp_secret: str = os.getenv("TOTP_SECRET", "")
+    client_code: str = field(default_factory=lambda: _required_env("CLIENT_CODE"))
+    pin: str = field(default_factory=lambda: _required_env("PIN"))
+    totp_secret: str = field(default_factory=lambda: _required_env("TOTP_SECRET"))
     # Optional. Prefer environment variable DHAN_ACCESS_TOKEN; never commit a real token.
-    access_token: str = ""
+    access_token: str = field(default_factory=lambda: os.getenv("DHAN_ACCESS_TOKEN", "").strip())
 
 @dataclass(frozen=True)
 class MarketConfig:

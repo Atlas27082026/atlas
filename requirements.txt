@@ -5,3 +5,4 @@ numpy
 ta-lib
 rich
 PyYAML
+python-dotenv
