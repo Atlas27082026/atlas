@@ -76,6 +76,14 @@ strategy:
       adx: 10
       structure: 10
 
+  trade_quality:
+    weights:
+      trend: 30
+      momentum: 25
+      structure: 20
+      volume: 15
+      market_context: 10
+
   scoring:
     near_signal_pct: 80.0
     weights:

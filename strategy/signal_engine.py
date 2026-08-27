@@ -11,6 +11,7 @@ from strategy.model_breakout import evaluate_breakout
 from strategy.model_vwap import evaluate_vwap_pullback
 from strategy.model_trend_continuation import evaluate_trend_continuation
 from strategy.market_state import evaluate_market_state
+from strategy.trade_quality import evaluate_trade_quality
 from strategy.settings import StrategySettings
 
 
@@ -141,6 +142,11 @@ class SignalEngine:
             decision = "NEAR" if final_score >= near else "NO_SIGNAL"
             model = bull_model if direction == "BULL" else bear_model
 
+        entry_trigger = bull_checks["ENTRY_TRIGGER"] if direction == "BULL" else bear_checks["ENTRY_TRIGGER"]
+        quality = evaluate_trade_quality(
+            row5, row15, direction, model or "", entry_trigger, market_state, self.settings, rvol_req
+        )
+
         metrics = {
             "close_5m": round(close5, 4),
             "ema_5m": round(float(row5["ema_5m"]), 4),
@@ -169,6 +175,13 @@ class SignalEngine:
             "market_bull_confidence": market_state.bull_confidence,
             "market_bear_confidence": market_state.bear_confidence,
             "market_state_reasons": "|".join(market_state.reasons),
+            "trade_quality_score": quality.score,
+            "trade_quality_reasons": "|".join(quality.reasons),
+            "trade_quality_trend": round(quality.components.get("trend", 0.0), 3),
+            "trade_quality_momentum": round(quality.components.get("momentum", 0.0), 3),
+            "trade_quality_structure": round(quality.components.get("structure", 0.0), 3),
+            "trade_quality_volume": round(quality.components.get("volume", 0.0), 3),
+            "trade_quality_market_context": round(quality.components.get("market_context", 0.0), 3),
             "entry_trigger_bull_details": {
                 "direction_ok": bull_direction_ok,
                 "vwap": vwap_bull.details,
