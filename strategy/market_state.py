@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import pandas as pd
-
-from strategy.settings import StrategySettings
 
 
 DEFAULT_WEIGHTS = {
@@ -27,7 +25,7 @@ class MarketStateResult:
     reasons: List[str]
 
 
-def _weights(settings: StrategySettings) -> Dict[str, float]:
+def _weights(settings: Any) -> Dict[str, float]:
     configured = settings.strategy.get("market_state", {}).get("weights", {})
     return {
         key: float(configured.get(key, value))
@@ -66,7 +64,7 @@ def evaluate_market_state(
     idx_5m: int,
     df_15m: pd.DataFrame,
     idx_15m: int,
-    settings: StrategySettings,
+    settings: Any,
 ) -> MarketStateResult:
     cfg = settings.strategy.get("market_state", {})
     weights = _weights(settings)

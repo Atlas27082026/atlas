@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import pandas as pd
 
 from strategy.market_state import MarketStateResult
-from strategy.settings import StrategySettings
 
 
 DEFAULT_WEIGHTS = {
@@ -25,7 +24,7 @@ class TradeQualityScore:
     reasons: List[str]
 
 
-def _weights(settings: StrategySettings) -> Dict[str, float]:
+def _weights(settings: Any) -> Dict[str, float]:
     configured = settings.strategy.get("trade_quality", {}).get("weights", {})
     return {
         key: float(configured.get(key, value))
@@ -40,7 +39,7 @@ def evaluate_trade_quality(
     model: str,
     entry_trigger: bool,
     market_state: MarketStateResult,
-    settings: StrategySettings,
+    settings: Any,
     rvol_required: float,
 ) -> TradeQualityScore:
     weights = _weights(settings)

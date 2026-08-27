@@ -1,14 +1,14 @@
 import unittest
+from types import SimpleNamespace
 
 import pandas as pd
 
 from strategy.market_state import evaluate_market_state
-from strategy.settings import StrategySettings
 
 
 def _settings():
-    return StrategySettings({
-        "strategy": {
+    return SimpleNamespace(
+        strategy={
             "market_state": {
                 "ema_slope_lookback": 1,
                 "structure_lookback": 2,
@@ -27,7 +27,7 @@ def _settings():
                 },
             }
         }
-    })
+    )
 
 
 class MarketStateTests(unittest.TestCase):

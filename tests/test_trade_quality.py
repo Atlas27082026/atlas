@@ -1,15 +1,15 @@
 import unittest
+from types import SimpleNamespace
 
 import pandas as pd
 
 from strategy.market_state import MarketStateResult
-from strategy.settings import StrategySettings
 from strategy.trade_quality import evaluate_trade_quality
 
 
 def _settings():
-    return StrategySettings({
-        "strategy": {
+    return SimpleNamespace(
+        strategy={
             "trade_quality": {
                 "weights": {
                     "trend": 30,
@@ -20,7 +20,7 @@ def _settings():
                 }
             }
         }
-    })
+    )
 
 
 class TradeQualityTests(unittest.TestCase):

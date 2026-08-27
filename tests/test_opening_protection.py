@@ -1,15 +1,15 @@
 import unittest
+from types import SimpleNamespace
 
 import pandas as pd
 
 from strategy.market_state import MarketStateResult
 from strategy.opening_protection import evaluate_opening_protection
-from strategy.settings import StrategySettings
 
 
 def _settings():
-    return StrategySettings({
-        "strategy": {
+    return SimpleNamespace(
+        strategy={
             "opening_protection": {
                 "enabled": True,
                 "observe_mode": True,
@@ -22,7 +22,7 @@ def _settings():
                 "exceptional_adx_15m": 30.0,
             }
         }
-    })
+    )
 
 
 class OpeningProtectionTests(unittest.TestCase):

@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import Any, List
 
 import pandas as pd
 
 from strategy.market_state import MarketStateResult
-from strategy.settings import StrategySettings
 
 
 @dataclass(frozen=True)
@@ -26,7 +25,7 @@ def evaluate_opening_protection(
     row15: pd.Series,
     market_state: MarketStateResult,
     quality_score: float,
-    settings: StrategySettings,
+    settings: Any,
 ) -> OpeningProtectionResult:
     cfg = settings.strategy.get("opening_protection", {})
     enabled = bool(cfg.get("enabled", True))
