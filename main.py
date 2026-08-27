@@ -252,6 +252,16 @@ def main() -> int:
 
             paper_open = paper_store.open_positions()
             strategy_pnl = paper_store.strategy_pnl()
+            if (
+                not getattr(state, "daily_loss_locked", False)
+                and strategy_pnl <= -risk.daily_loss_limit(state)
+            ):
+                state.daily_loss_locked = True
+                state_store.save(state)
+                logger.error(
+                    "Daily loss circuit breaker latched | Paper P&L ₹%.2f <= -₹%.2f | new entries locked for trading date %s",
+                    strategy_pnl, risk.daily_loss_limit(state), state.trading_date,
+                )
             decision = risk.can_open_new_trade(
                 state=state,
                 managed_open_positions=len(paper_open),

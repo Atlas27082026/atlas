@@ -11,6 +11,7 @@ class DailyState:
     session_start_balance: float = 0.0
     daily_trade_count: int = 0
     consecutive_losses: int = 0
+    daily_loss_locked: bool = False
     traded_underlyings: List[str] = field(default_factory=list)
     last_processed_candle: Dict[str, str] = field(default_factory=dict)
     last_order_ids: List[str] = field(default_factory=list)

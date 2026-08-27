@@ -37,6 +37,9 @@ class RiskManager:
         """
         risk = self.config.risk
 
+        if getattr(state, "daily_loss_locked", False):
+            return RiskDecision(False, "STRATEGY_DAILY_LOSS_LOCKED")
+
         if state.daily_trade_count >= risk.max_daily_trades:
             return RiskDecision(False, "MAX_DAILY_TRADES")
 
@@ -57,7 +60,7 @@ class RiskManager:
             if not risk.dry_run and risk.fail_closed_on_risk_data_error:
                 return RiskDecision(False, "STRATEGY_PNL_UNAVAILABLE")
         elif strategy_pnl <= -self.daily_loss_limit(state):
-            return RiskDecision(False, "STRATEGY_DAILY_LOSS_LIMIT")
+            return RiskDecision(False, "STRATEGY_DAILY_LOSS_LOCKED")
 
         return RiskDecision(True, "OK")
 
