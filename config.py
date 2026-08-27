@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
+import os
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -11,12 +12,11 @@ DATA_DIR = BASE_DIR / "runtime_data"
 
 @dataclass(frozen=True)
 class CredentialsConfig:
-    client_code: str = "1111752561"
-    pin: str = "197015"
-    totp_secret: str = "CRX47FK4OR6TXCPNZ3GZPONGMNGGJ2OL"
+    client_code: str = os.getenv("CLIENT_CODE", "") 
+    pin: str = os.getenv("PIN", "") 
+    totp_secret: str = os.getenv("TOTP_SECRET", "")
     # Optional. Prefer environment variable DHAN_ACCESS_TOKEN; never commit a real token.
     access_token: str = ""
-
 
 @dataclass(frozen=True)
 class MarketConfig:
