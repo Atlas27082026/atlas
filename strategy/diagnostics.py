@@ -16,6 +16,8 @@ FIELDS = [
     "market_state", "market_bull_confidence", "market_bear_confidence", "market_state_reasons",
     "trade_quality_score", "trade_quality_reasons", "trade_quality_trend", "trade_quality_momentum",
     "trade_quality_structure", "trade_quality_volume", "trade_quality_market_context",
+    "opening_window", "opening_observe_mode", "opening_confirmation_passed", "opening_exceptional",
+    "opening_reason", "opening_reasons",
 ]
 
 

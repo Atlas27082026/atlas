@@ -11,6 +11,7 @@ from strategy.model_breakout import evaluate_breakout
 from strategy.model_vwap import evaluate_vwap_pullback
 from strategy.model_trend_continuation import evaluate_trend_continuation
 from strategy.market_state import evaluate_market_state
+from strategy.opening_protection import evaluate_opening_protection
 from strategy.trade_quality import evaluate_trade_quality
 from strategy.settings import StrategySettings
 
@@ -148,6 +149,9 @@ class SignalEngine:
         quality = evaluate_trade_quality(
             row5, row15, direction, model or "", entry_trigger, market_state, self.settings, rvol_req
         )
+        opening = evaluate_opening_protection(
+            hhmm, direction, row5, row15, market_state, quality.score, self.settings
+        )
 
         metrics = {
             "close_5m": round(close5, 4),
@@ -187,6 +191,12 @@ class SignalEngine:
             "trade_quality_structure": round(quality.components.get("structure", 0.0), 3),
             "trade_quality_volume": round(quality.components.get("volume", 0.0), 3),
             "trade_quality_market_context": round(quality.components.get("market_context", 0.0), 3),
+            "opening_window": opening.in_opening_window,
+            "opening_observe_mode": opening.observe_mode,
+            "opening_confirmation_passed": opening.passed,
+            "opening_exceptional": opening.exceptional,
+            "opening_reason": opening.reason,
+            "opening_reasons": "|".join(opening.reasons),
             "entry_trigger_bull_details": {
                 "direction_ok": bull_direction_ok,
                 "vwap": vwap_bull.details,
