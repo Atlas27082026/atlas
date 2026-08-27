@@ -143,6 +143,8 @@ class SignalEngine:
             model = bull_model if direction == "BULL" else bear_model
 
         entry_trigger = bull_checks["ENTRY_TRIGGER"] if direction == "BULL" else bear_checks["ENTRY_TRIGGER"]
+        macro_ok = bull_checks["MACRO_BULL"] if direction == "BULL" else bear_checks["MACRO_BEAR"]
+        rvol_ok = bull_checks["RVOL"] if direction == "BULL" else bear_checks["RVOL"]
         quality = evaluate_trade_quality(
             row5, row15, direction, model or "", entry_trigger, market_state, self.settings, rvol_req
         )
@@ -165,6 +167,9 @@ class SignalEngine:
             "adx_15m": round(float(row15["adx_15m"]), 2),
             "bull_direction_ok": bull_direction_ok,
             "bear_direction_ok": bear_direction_ok,
+            "macro_ok": macro_ok,
+            "rvol_ok": rvol_ok,
+            "entry_trigger_ok": entry_trigger,
             "vwap_bull": vwap_bull.passed,
             "vwap_bear": vwap_bear.passed,
             "breakout_bull": bo_bull.passed,

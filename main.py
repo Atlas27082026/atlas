@@ -10,6 +10,7 @@ from core.state import StateStore
 from core.position_ownership import ManagedPositionStore, reconcile_position_ownership
 from core.paper_positions import PaperPositionStore, manage_paper_position
 from core.journal import CsvJournal
+from core.decision_audit import DecisionAuditWriter
 from data.tradehull_client import TradeHullBroker
 from execution.contract_resolver import InstrumentMasterResolver
 from execution.diagnostics import ExecutionDiagnostics
@@ -93,6 +94,7 @@ def main() -> int:
     day = datetime.now().strftime("%Y-%m-%d")
     diagnostics = DiagnosticsWriter(DATA_DIR / day / "diagnostics.csv")
     exec_diag = ExecutionDiagnostics(DATA_DIR / day / "execution_candidates.csv")
+    decision_audit = DecisionAuditWriter(DATA_DIR / day / "decision_audit.csv")
     paper_journal = CsvJournal(DATA_DIR / day / "paper_trade_journal.csv", [
         "timestamp", "event", "trade_id", "underlying", "direction", "model",
         "contract_symbol", "security_id", "quantity", "price", "pnl", "reason",
@@ -306,15 +308,19 @@ def main() -> int:
                     # Research signals are still logged after cutoff, but execution resolution is stopped.
                     if hhmm >= config.market.new_entry_cutoff:
                         logger.info("%s execution skipped: ENTRY_CUTOFF %s reached (signal retained for research)", symbol, config.market.new_entry_cutoff)
+                        decision_audit.append(result, decision.reason, "ENTRY_REJECTED", "ENTRY_CUTOFF")
                         continue
                     if not decision.allowed:
                         logger.info("%s execution skipped: risk gate %s", symbol, decision.reason)
+                        decision_audit.append(result, decision.reason, "ENTRY_REJECTED", decision.reason)
                         continue
                     if state.daily_trade_count >= config.risk.max_daily_trades:
                         logger.info("%s execution skipped: MAX_DAILY_TRADES %d reached", symbol, config.risk.max_daily_trades)
+                        decision_audit.append(result, "MAX_DAILY_TRADES", "ENTRY_REJECTED", "MAX_DAILY_TRADES")
                         continue
                     if paper_store.has_open_underlying(symbol):
                         logger.info("%s execution skipped: PAPER_POSITION_ALREADY_OPEN", symbol)
+                        decision_audit.append(result, decision.reason, "ENTRY_REJECTED", "PAPER_POSITION_ALREADY_OPEN")
                         continue
 
                     contracts = []
@@ -332,6 +338,7 @@ def main() -> int:
                         logger.info("%s resolver: %d nearby contracts from instrument master", symbol, len(contracts))
                     if not contracts:
                         logger.warning("%s: no option contracts resolved", symbol)
+                        decision_audit.append(result, decision.reason, "ENTRY_REJECTED", "NO_OPTION_CONTRACTS")
                         continue
 
                     # Security-ID quotes are authoritative and bypass TradeHull's
@@ -418,6 +425,7 @@ def main() -> int:
                     best = selector.choose_best(accepted)
                     if best is None:
                         logger.info("%s: no contract passed verified-data execution threshold", symbol)
+                        decision_audit.append(result, decision.reason, "ENTRY_REJECTED", "NO_EXECUTABLE_CONTRACT")
                         continue
                     exec_candidates += 1
                     paper = paper_store.add_from_candidate(symbol, result.direction, result.model, best)
@@ -437,6 +445,7 @@ def main() -> int:
                         symbol, best.contract.trading_symbol, best.liquidity.grade, best.liquidity.health_score, best.liquidity.confidence,
                         best.quantity, best.entry_limit, best.target_price, best.stop_price, paper.trade_id,
                     )
+                    decision_audit.append(result, decision.reason, "ENTRY_ACCEPTED", "OK")
 
                 except Exception as exc:
                     logger.warning("Skipping %s: %s", symbol, exc)
