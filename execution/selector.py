@@ -4,7 +4,7 @@ from typing import Iterable, List, Optional, Tuple
 
 from config import AppConfig
 from execution.liquidity import LiquidityScorer
-from execution.models import ContractCandidate, ExecutionCandidate, QuoteSnapshot
+from execution.models import ContractCandidate, ExecutionCandidate, LiquidityAssessment, QuoteSnapshot
 
 
 class ContractSelector:
@@ -12,8 +12,16 @@ class ContractSelector:
         self.config = config
         self.scorer = LiquidityScorer(config)
 
-    def build_candidate(self, contract: ContractCandidate, quote: QuoteSnapshot, lot_size: int, capital: float) -> Optional[ExecutionCandidate]:
-        assessment = self.scorer.assess(quote, lot_size)
+    def build_candidate(
+        self,
+        contract: ContractCandidate,
+        quote: QuoteSnapshot,
+        lot_size: int,
+        capital: float,
+        assessment: Optional[LiquidityAssessment] = None,
+    ) -> Optional[ExecutionCandidate]:
+        if assessment is None:
+            assessment = self.scorer.assess(quote, lot_size)
         if not assessment.accepted:
             return None
         reference = quote.ask if quote.ask is not None and quote.ask > 0 else quote.ltp

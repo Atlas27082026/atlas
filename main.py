@@ -407,7 +407,7 @@ def main() -> int:
                             lot_size = int(contract.lot_size or 0)
 
                         assessment = scorer.assess(quote, lot_size)
-                        candidate = selector.build_candidate(contract, quote, lot_size, capital)
+                        candidate = selector.build_candidate(contract, quote, lot_size, capital, assessment)
                         exec_diag.append_assessment(
                             symbol, result.direction, result.model, result.score_pct, contract, quote, assessment,
                             lot_size, candidate, broker_symbol=broker_symbol,
