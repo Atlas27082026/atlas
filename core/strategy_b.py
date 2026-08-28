@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from execution.models import ContractCandidate
+from strategy.market_state import evaluate_market_state
 
 
 MARKET_TZ = ZoneInfo("Asia/Kolkata")
@@ -38,6 +39,11 @@ class PendingSetup:
     resolved_at: str = ""
     executed_at: str = ""
     executed_price: float = 0.0
+    setup_kind: str = "FULL_SIGNAL"
+    context_15m: str = ""
+    setup_5m: str = ""
+    setup_score: float = 0.0
+    setup_reasons: List[str] = field(default_factory=list)
 
     @property
     def is_pending(self) -> bool:
@@ -71,6 +77,67 @@ class ConfirmationResult:
     close_price: float = 0.0
     atr_1m: float = 0.0
     diagnostics: Optional[ConfirmationDiagnostics] = None
+
+
+@dataclass(frozen=True)
+class FifteenMinuteContext:
+    state: str
+    bull_confidence: float
+    bear_confidence: float
+    reasons: List[str]
+
+
+@dataclass(frozen=True)
+class MTFSetupResult:
+    symbol: str
+    candle_time: str
+    direction: Optional[str]
+    decision: str
+    model: str
+    score_pct: float
+    context_15m: str
+    blockers: List[str]
+    reasons: List[str]
+    metrics: Dict[str, object]
+
+
+@dataclass(frozen=True)
+class MTFTriggerDiagnostics:
+    elapsed_seconds: int
+    expires_in_seconds: int
+    setup_time: str
+    trigger_time: str
+    delay_seconds: int
+    close_1m: float
+    previous_high_1m: float
+    previous_low_1m: float
+    vwap_1m: float
+    atr_1m: float
+    momentum_1m: float
+    volume_1m: float
+    previous_volume_1m: float
+    rvol_1m: float
+    distance_from_trigger: float
+    extension_atr: float
+    allowed_extension_atr: float
+    direction: bool
+    break_trigger: bool
+    momentum: bool
+    vwap: bool
+    context: bool
+    extension: bool
+    stale_data: bool
+    action: str
+
+
+@dataclass(frozen=True)
+class MTFTriggerResult:
+    triggered: bool
+    cancel: bool
+    reason: str
+    close_price: float = 0.0
+    atr_1m: float = 0.0
+    diagnostics: Optional[MTFTriggerDiagnostics] = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +203,29 @@ def _timestamp_series(values) -> pd.Series:
     )
 
 
+def _latest_completed_index(df: pd.DataFrame, timeframe_minutes: int) -> Tuple[int, pd.Timestamp]:
+    if len(df) < 2:
+        raise ValueError("Need at least two candles")
+    last_ts = _timestamp(df.iloc[-1]["datetime_parsed"])
+    now = pd.Timestamp.now(tz=last_ts.tzinfo)
+    age_seconds = (now - last_ts).total_seconds()
+    idx = len(df) - 2 if age_seconds < timeframe_minutes * 60 else len(df) - 1
+    return idx, _timestamp(df.iloc[idx]["datetime_parsed"])
+
+
+def _mtf_config(settings) -> Dict[str, object]:
+    return settings.strategy.get("strategy_b_mtf", {})
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        if pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
 class PendingSetupStore:
     def __init__(self, path: Path):
         self.path = path
@@ -193,6 +283,11 @@ class PendingSetupStore:
             signal_5m_vwap=float(result.metrics["vwap_session"]),
             created_at=now.isoformat(timespec="seconds"),
             expires_at=(now + timedelta(minutes=int(expiry_minutes))).isoformat(timespec="seconds"),
+            setup_kind=str(getattr(result, "decision", "") or "FULL_SIGNAL"),
+            context_15m=str(getattr(result, "context_15m", "") or result.metrics.get("context_15m", "")),
+            setup_5m=str(getattr(result, "decision", "") or ""),
+            setup_score=float(getattr(result, "score_pct", 0.0) or 0.0),
+            setup_reasons=list(getattr(result, "reasons", []) or []),
         )
         setups.append(setup)
         self.save(setups)
@@ -262,6 +357,290 @@ def _expiry_reason(diagnostics: Optional[ConfirmationDiagnostics]) -> str:
     if not diagnostics.trend:
         return "Trend confirmation never occurred"
     return "Confirmation never occurred"
+
+
+def evaluate_15m_context(
+    df_5m: pd.DataFrame,
+    idx_5m: int,
+    df_15m: pd.DataFrame,
+    idx_15m: int,
+    settings,
+) -> FifteenMinuteContext:
+    state = evaluate_market_state(df_5m, idx_5m, df_15m, idx_15m, settings)
+    row15 = df_15m.iloc[idx_15m]
+    close15 = _safe_float(row15["close"])
+    ema15 = _safe_float(row15["ema_15m"])
+    rsi15 = _safe_float(row15["rsi_15m"])
+    roc15 = _safe_float(row15["roc_15m"])
+    adx15 = _safe_float(row15["adx_15m"])
+    cfg = settings.strategy.get("macro", {})
+    adx_min = float(cfg.get("adx_min", 22.0))
+    bull_rsi = float(cfg.get("rsi_bull_min", 50.0))
+    bear_rsi = float(cfg.get("rsi_bear_max", 50.0))
+    bull = close15 > ema15 and roc15 > 0 and rsi15 > bull_rsi and adx15 >= adx_min
+    bear = close15 < ema15 and roc15 < 0 and rsi15 < bear_rsi and adx15 >= adx_min
+    if bull and not bear:
+        context = "BULL"
+    elif bear and not bull:
+        context = "BEAR"
+    else:
+        context = "NEUTRAL"
+    reasons = list(state.reasons)
+    reasons.append(f"15M_{context}")
+    return FifteenMinuteContext(context, state.bull_confidence, state.bear_confidence, reasons)
+
+
+def evaluate_mtf_setup(
+    symbol: str,
+    df_5m: pd.DataFrame,
+    df_15m: pd.DataFrame,
+    hhmm: str,
+    settings,
+) -> MTFSetupResult:
+    idx5, ts5 = _latest_completed_index(df_5m, 5)
+    idx15, _ = _latest_completed_index(df_15m, 15)
+    row5 = df_5m.iloc[idx5]
+    row15 = df_15m.iloc[idx15]
+    required = [
+        row5.get("ema_5m"), row5.get("rsi_5m"), row5.get("roc_5m"),
+        row5.get("vwap_session"), row5.get("vwap_weekly"), row5.get("rvol"),
+        row5.get("st_direction"), row15.get("ema_15m"), row15.get("rsi_15m"),
+        row15.get("roc_15m"), row15.get("adx_15m"),
+    ]
+    if any(pd.isna(x) for x in required):
+        return MTFSetupResult(symbol, str(ts5), None, "NONE", "MTF_SETUP", 0.0, "NEUTRAL", ["INDICATORS_NOT_READY"], [], {})
+
+    cfg = _mtf_config(settings)
+    rvol_req = float(cfg.get("setup_rvol_min", 0.90))
+    bull_rsi = float(cfg.get("setup_rsi_bull_min_5m", 52.0))
+    bear_rsi = float(cfg.get("setup_rsi_bear_max_5m", 48.0))
+    min_score = float(cfg.get("setup_min_score", 70.0))
+    require_vwap = bool(cfg.get("setup_require_session_vwap", True))
+    require_supertrend = bool(cfg.get("setup_require_supertrend", False))
+
+    context = evaluate_15m_context(df_5m, idx5, df_15m, idx15, settings)
+    close5 = _safe_float(row5["close"])
+    ema5 = _safe_float(row5["ema_5m"])
+    rsi5 = _safe_float(row5["rsi_5m"])
+    roc5 = _safe_float(row5["roc_5m"])
+    rvol5 = _safe_float(row5["rvol"])
+    vwap5 = _safe_float(row5["vwap_session"])
+    weekly_vwap = _safe_float(row5["vwap_weekly"])
+    st_direction = str(row5["st_direction"])
+
+    bull_checks = {
+        "CONTEXT": context.state in {"BULL", "NEUTRAL"},
+        "EMA": close5 > ema5,
+        "MOMENTUM": roc5 > 0 and rsi5 >= bull_rsi,
+        "VWAP": close5 > vwap5 if require_vwap else True,
+        "RVOL": rvol5 >= rvol_req,
+        "SUPERTREND": st_direction == "BULL" if require_supertrend else True,
+    }
+    bear_checks = {
+        "CONTEXT": context.state in {"BEAR", "NEUTRAL"},
+        "EMA": close5 < ema5,
+        "MOMENTUM": roc5 < 0 and rsi5 <= bear_rsi,
+        "VWAP": close5 < vwap5 if require_vwap else True,
+        "RVOL": rvol5 >= rvol_req,
+        "SUPERTREND": st_direction == "BEAR" if require_supertrend else True,
+    }
+    weights = {
+        "CONTEXT": 25.0,
+        "EMA": 20.0,
+        "MOMENTUM": 20.0,
+        "VWAP": 15.0,
+        "RVOL": 10.0,
+        "SUPERTREND": 10.0,
+    }
+
+    def score(checks: Dict[str, bool]) -> float:
+        return sum(weight for key, weight in weights.items() if checks.get(key, False))
+
+    bull_score = score(bull_checks)
+    bear_score = score(bear_checks)
+    if bull_score >= bear_score:
+        direction = "BULL"
+        checks = bull_checks
+        score_pct = bull_score
+        setup_name = "BULL_SETUP"
+    else:
+        direction = "BEAR"
+        checks = bear_checks
+        score_pct = bear_score
+        setup_name = "BEAR_SETUP"
+
+    blockers = [key for key, passed in checks.items() if not passed]
+    decision = setup_name if score_pct >= min_score and not blockers else "NONE"
+    reasons = [key for key, passed in checks.items() if passed]
+    metrics = {
+        "close_5m": round(close5, 4),
+        "ema_5m": round(ema5, 4),
+        "rsi_5m": round(rsi5, 2),
+        "roc_5m": round(roc5, 3),
+        "rvol": round(rvol5, 3),
+        "rvol_required": round(rvol_req, 3),
+        "vwap_session": round(vwap5, 4),
+        "vwap_weekly": round(weekly_vwap, 4),
+        "st_direction": st_direction,
+        "close_15m": round(_safe_float(row15["close"]), 4),
+        "ema_15m": round(_safe_float(row15["ema_15m"]), 4),
+        "rsi_15m": round(_safe_float(row15["rsi_15m"]), 2),
+        "roc_15m": round(_safe_float(row15["roc_15m"]), 3),
+        "adx_15m": round(_safe_float(row15["adx_15m"]), 2),
+        "context_15m": context.state,
+        "context_bull_confidence": context.bull_confidence,
+        "context_bear_confidence": context.bear_confidence,
+        "context_reasons": "|".join(context.reasons),
+        "setup_checks": checks,
+        "setup_score": score_pct,
+    }
+    return MTFSetupResult(
+        symbol=symbol,
+        candle_time=str(ts5),
+        direction=direction if decision != "NONE" else None,
+        decision=decision,
+        model="MTF_SETUP",
+        score_pct=score_pct,
+        context_15m=context.state,
+        blockers=blockers,
+        reasons=reasons,
+        metrics=metrics,
+    )
+
+
+def _setup_context_still_valid(setup: PendingSetup, df_5m: pd.DataFrame, df_15m: pd.DataFrame, settings) -> Tuple[bool, str, str]:
+    current = evaluate_mtf_setup(setup.symbol, df_5m, df_15m, _clock(_now()), settings)
+    if current.decision == "NONE":
+        return False, "5M_CONTEXT_INVALIDATED", current.context_15m
+    if current.direction != setup.direction:
+        return False, "5M_DIRECTION_FLIPPED", current.context_15m
+    return True, "OK", current.context_15m
+
+
+def evaluate_mtf_trigger(
+    setup: PendingSetup,
+    df_1m: pd.DataFrame,
+    max_extension_atr: float,
+    df_5m: Optional[pd.DataFrame] = None,
+    df_15m: Optional[pd.DataFrame] = None,
+    settings=None,
+) -> MTFTriggerResult:
+    if len(df_1m) < 2:
+        return MTFTriggerResult(False, False, "ONE_MINUTE_NOT_READY")
+
+    context_state = setup.context_15m or ""
+    if df_5m is not None and df_15m is not None and settings is not None:
+        valid, reason, context_state = _setup_context_still_valid(setup, df_5m, df_15m, settings)
+        if not valid:
+            return MTFTriggerResult(False, True, reason)
+
+    out = df_1m.copy()
+    out["datetime_parsed"] = _timestamp_series(out["datetime_parsed"])
+    out["vwap_1m"] = _session_vwap(out)
+    idx = len(out) - 1
+    row = out.iloc[idx]
+    prev = out.iloc[idx - 1]
+    close = _safe_float(row["close"])
+    open_ = _safe_float(row["open"])
+    prev_high = _safe_float(prev["high"])
+    prev_low = _safe_float(prev["low"])
+    atr = _atr_1m(out, idx)
+    allowed_extension_atr = float(max_extension_atr)
+    volume = _safe_float(row["volume"])
+    prev_volume = _safe_float(prev["volume"])
+    rvol = volume / prev_volume if prev_volume > 0 else 0.0
+    current_time = _timestamp(row["datetime_parsed"]).to_pydatetime()
+    created = _parse_dt(setup.created_at) or current_time
+    expires = _parse_dt(setup.expires_at) or current_time
+
+    if setup.direction == "BULL":
+        direction_ok = close > open_
+        break_trigger = close > prev_high
+        momentum_ok = close > open_
+        vwap_ok = close > _safe_float(row["vwap_1m"])
+        context_ok = context_state not in {"BEAR", "STRONG_BEAR"}
+        distance_from_trigger = close - prev_high
+    else:
+        direction_ok = close < open_
+        break_trigger = close < prev_low
+        momentum_ok = close < open_
+        vwap_ok = close < _safe_float(row["vwap_1m"])
+        context_ok = context_state not in {"BULL", "STRONG_BULL"}
+        distance_from_trigger = prev_low - close
+
+    extension_atr = distance_from_trigger / atr if atr > 0 else 0.0
+    extension_ok = atr <= 0 or extension_atr <= allowed_extension_atr
+    stale_ok = volume > 0
+    triggered = all([direction_ok, break_trigger, momentum_ok, vwap_ok, context_ok, extension_ok, stale_ok])
+    reason = "PREV_1M_HIGH_BREAK" if setup.direction == "BULL" else "PREV_1M_LOW_BREAK"
+    if not context_ok:
+        reason = "15M_CONTEXT_CONTRADICTORY"
+    elif not extension_ok:
+        reason = "ENTRY_EXTENSION_EXCEEDED"
+    elif not triggered:
+        reason = "WAITING_FOR_1M_TRIGGER"
+
+    diagnostics = MTFTriggerDiagnostics(
+        elapsed_seconds=max(0, int((current_time - created).total_seconds())),
+        expires_in_seconds=max(0, int((expires - current_time).total_seconds())),
+        setup_time=_clock(setup.created_at),
+        trigger_time=current_time.strftime("%H:%M:%S"),
+        delay_seconds=max(0, int((current_time - created).total_seconds())),
+        close_1m=close,
+        previous_high_1m=prev_high,
+        previous_low_1m=prev_low,
+        vwap_1m=_safe_float(row["vwap_1m"]),
+        atr_1m=atr,
+        momentum_1m=close - open_,
+        volume_1m=volume,
+        previous_volume_1m=prev_volume,
+        rvol_1m=rvol,
+        distance_from_trigger=distance_from_trigger,
+        extension_atr=extension_atr,
+        allowed_extension_atr=allowed_extension_atr,
+        direction=direction_ok,
+        break_trigger=break_trigger,
+        momentum=momentum_ok,
+        vwap=vwap_ok,
+        context=context_ok,
+        extension=extension_ok,
+        stale_data=stale_ok,
+        action="TRIGGER" if triggered else "CANCEL" if not context_ok else "WAIT",
+    )
+    return MTFTriggerResult(triggered, not context_ok, reason, close, atr, diagnostics)
+
+
+def format_mtf_check(setup: PendingSetup, result: MTFTriggerResult) -> str:
+    d = result.diagnostics
+    direction = setup.direction or "NONE"
+    if d is None:
+        return f"[B] MTF CHECK | {setup.symbol} | {direction} | action=WAIT | reason={result.reason}"
+    return (
+        f"[B] MTF CHECK | {setup.symbol} | {direction} | "
+        f"15m_context={setup.context_15m or 'N/A'} | "
+        f"5m_setup={setup.setup_5m or setup.setup_kind} | "
+        f"1m_direction={_pass_fail(d.direction)} | "
+        f"1m_break={_pass_fail(d.break_trigger)} | "
+        f"1m_momentum={_pass_fail(d.momentum)} | "
+        f"1m_vwap={_pass_fail(d.vwap)} | "
+        f"extension={d.extension_atr:.2f}ATR | "
+        f"allowed_extension={d.allowed_extension_atr:.2f}ATR | "
+        f"close_1m={d.close_1m:.2f} | prev_high_1m={d.previous_high_1m:.2f} | "
+        f"prev_low_1m={d.previous_low_1m:.2f} | vwap_1m={d.vwap_1m:.2f} | "
+        f"atr_1m={d.atr_1m:.2f} | action={d.action} | reason={result.reason}"
+    )
+
+
+def format_mtf_trigger(setup: PendingSetup, result: MTFTriggerResult) -> str:
+    d = result.diagnostics
+    if d is None:
+        return f"[B] MTF TRIGGER | {setup.symbol} | {setup.direction} | reason={result.reason}"
+    return (
+        f"[B] MTF TRIGGER | {setup.symbol} | {setup.direction} | "
+        f"setup_time={d.setup_time} | trigger_time={d.trigger_time} | "
+        f"delay_seconds={d.delay_seconds} | trigger_price={d.close_1m:.2f} | "
+        f"reason={result.reason} | extension={d.extension_atr:.2f}ATR"
+    )
 
 
 def format_confirmation_check(setup: PendingSetup, result: ConfirmationResult) -> str:

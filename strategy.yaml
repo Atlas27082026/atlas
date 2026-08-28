@@ -95,6 +95,14 @@ strategy:
     exceptional_quality_score: 90.0
     exceptional_adx_15m: 30.0
 
+  strategy_b_mtf:
+    setup_min_score: 70.0
+    setup_rsi_bull_min_5m: 52.0
+    setup_rsi_bear_max_5m: 48.0
+    setup_rvol_min: 0.90
+    setup_require_session_vwap: true
+    setup_require_supertrend: false
+
   scoring:
     near_signal_pct: 80.0
     weights:

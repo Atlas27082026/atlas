@@ -95,7 +95,7 @@ class ExecutionConfig:
     instrument_master_path: str = ""
     nearby_strikes_each_side: int = 4
     preferred_option_exchange: str = "NSE"
-    native_quote_diagnostics: bool = True
+    native_quote_diagnostics: bool = False
     native_quote_diagnostics_once: bool = True
     native_quote_diagnostics_max_chars: int = 6000
     # Sprint 4 paper-position management.
@@ -103,6 +103,7 @@ class ExecutionConfig:
     paper_trailing_pct: float = 0.05
     enable_strategy_b: bool = False
     strategy_b_pending_expiry_minutes: int = 5
+    strategy_b_setup_max_minutes: int = 10
     strategy_b_monitor_interval_seconds: int = 60
     strategy_b_max_adverse_atr_1m: float = 0.5
 

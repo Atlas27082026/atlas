@@ -19,9 +19,13 @@ from core.strategy_b import (
     compute_strategy_stats,
     contract_from_setup,
     evaluate_confirmation,
+    evaluate_mtf_setup,
+    evaluate_mtf_trigger,
     expire_pending_setups,
     format_confirmation_check,
     format_confirmation_passed,
+    format_mtf_check,
+    format_mtf_trigger,
     format_pending_expired,
     mark_setup_cancelled,
     mark_setup_executed,
@@ -60,6 +64,128 @@ def _entry_trigger_summary(result):
         if failed:
             parts.append(f"{label}[{','.join(failed)}]")
     return " | ".join(parts[:3])
+
+
+def _select_best_contract(
+    *,
+    logger,
+    broker,
+    resolver,
+    config,
+    scorer,
+    selector,
+    exec_diag,
+    risk,
+    state,
+    symbol,
+    direction,
+    model,
+    score_pct,
+    underlying_price,
+    log_prefix="",
+    native_quote_debug_state=None,
+):
+    contracts = []
+    if resolver is not None:
+        contracts = resolver.resolve(
+            symbol, direction, float(underlying_price),
+            config.execution.nearby_strikes_each_side,
+            preferred_exchange=config.execution.preferred_option_exchange,
+        )
+    if not contracts:
+        contracts = broker.resolve_nearby_options_legacy(symbol, direction)
+        if contracts:
+            logger.info("%s resolver fallback: %d legacy contracts", symbol, len(contracts))
+    else:
+        logger.info("%s resolver: %d nearby contracts from instrument master", symbol, len(contracts))
+    if not contracts:
+        logger.warning("%s%s: no option contracts resolved", log_prefix, symbol)
+        return None
+
+    security_ids = [c.security_id for c in contracts if str(c.security_id).strip()]
+    security_quote_payload = {}
+    quote_segments = sorted({str(c.exchange_segment or "").strip() for c in contracts if str(c.exchange_segment or "").strip()})
+    quote_segment = quote_segments[0] if len(quote_segments) == 1 else ""
+    if len(quote_segments) > 1:
+        logger.warning("%s resolver returned mixed quote segments: %s; execution fails closed", symbol, quote_segments)
+    if security_ids and quote_segment:
+        try:
+            security_quote_payload = broker.get_quote_data_by_security_ids(
+                security_ids, exchange_segment=quote_segment
+            )
+            debug_done = bool((native_quote_debug_state or {}).get("done", False))
+            if config.execution.native_quote_diagnostics and (
+                not config.execution.native_quote_diagnostics_once or not debug_done
+            ):
+                raw = repr(security_quote_payload)
+                max_chars = int(config.execution.native_quote_diagnostics_max_chars)
+                if len(raw) > max_chars:
+                    raw = raw[:max_chars] + "...<truncated>"
+                logger.debug(
+                    "NATIVE_QUOTE_DEBUG | symbol=%s | segment=%s | requested_ids=%s | response_type=%s | raw=%s",
+                    symbol, quote_segment, security_ids, type(security_quote_payload).__name__, raw,
+                )
+                if native_quote_debug_state is not None:
+                    native_quote_debug_state["done"] = True
+        except Exception as exc:
+            debug_done = bool((native_quote_debug_state or {}).get("done", False))
+            if config.execution.native_quote_diagnostics and (
+                not config.execution.native_quote_diagnostics_once or not debug_done
+            ):
+                logger.debug(
+                    "NATIVE_QUOTE_DEBUG_EXCEPTION | symbol=%s | segment=%s | requested_ids=%s | exc_type=%s | error=%s",
+                    symbol, quote_segment, security_ids, type(exc).__name__, exc,
+                )
+                if native_quote_debug_state is not None:
+                    native_quote_debug_state["done"] = True
+            logger.warning("%s security-ID quote path unavailable: %s", symbol, exc)
+
+    accepted = []
+    capital = risk.capital_for_trade(risk.strategy_capital_base(state))
+    alternatives = []
+    for contract in contracts:
+        broker_symbol = broker.quote_symbol(contract)
+        quote_source = "DHAN_SECURITY_ID"
+        quote = parse_quote_response(security_quote_payload, str(contract.security_id))
+
+        if quote.ltp is None and quote.bid is None and quote.ask is None:
+            quote_source = "NATIVE_DHAN_UNAVAILABLE"
+
+        quote = type(quote)(**{**quote.__dict__, "source": quote_source})
+
+        try:
+            lot_size = broker.lot_size_for_contract(contract)
+        except Exception:
+            lot_size = int(contract.lot_size or 0)
+
+        assessment = scorer.assess(quote, lot_size)
+        candidate = selector.build_candidate(contract, quote, lot_size, capital, assessment)
+        exec_diag.append_assessment(
+            symbol, direction, model, score_pct, contract, quote, assessment,
+            lot_size, candidate, broker_symbol=broker_symbol,
+        )
+        spread_text = "N/A" if assessment.spread_pct is None else f"{assessment.spread_pct:.1f}%"
+        logger.info(
+            "%s | master=%s | broker=%s | exch=%s/%s | sec=%s | strike=%s | quote=%s | grade=%s health=%.0f conf=%s spread=%s | %s",
+            symbol, contract.trading_symbol, broker_symbol, contract.exchange_id or "N/A", contract.exchange_segment or "N/A", contract.security_id or "N/A",
+            contract.strike, quote_source, assessment.grade, assessment.health_score, assessment.confidence,
+            spread_text, ("ACCEPT" if candidate else "REJECT: " + (",".join(assessment.reasons) if assessment.reasons else "NOT_EXECUTABLE")),
+        )
+        alternatives.append(
+            f"{contract.trading_symbol}:grade={assessment.grade},health={assessment.health_score:.0f},spread={spread_text}"
+        )
+        if candidate:
+            accepted.append(candidate)
+
+    best = selector.choose_best(accepted)
+    if best is not None:
+        chosen_spread = "N/A" if best.liquidity.spread_pct is None else f"{best.liquidity.spread_pct:.1f}%"
+        logger.info(
+            "CONTRACT_SELECTED | symbol=%s | chosen=%s | reason=highest_rank | health=%.0f | grade=%s | spread=%s | premium=%.2f | alternatives=%s",
+            symbol, best.contract.trading_symbol, best.liquidity.health_score, best.liquidity.grade,
+            chosen_spread, best.entry_limit, ";".join(alternatives[:8]),
+        )
+    return best
 
 
 def main() -> int:
@@ -211,7 +337,7 @@ def main() -> int:
         native_diag.get("source") or "N/A",
         ", ".join(native_diag.get("candidate_methods") or []) or "NONE",
     )
-    native_quote_debug_done = False
+    native_quote_debug_state = {"done": False}
 
     if not config.risk.dry_run:
         logger.error("Sprint 4.0 is PAPER ONLY and intentionally refuses LIVE mode. Keep dry_run=True.")
@@ -360,6 +486,10 @@ def main() -> int:
                         ).diagnostics
                     except Exception as exc:
                         logger.warning("[B] Pending expiry diagnostics unavailable | %s | %s", expired_setup.symbol, exc)
+                    logger.info(
+                        "[B] MTF SETUP EXPIRED | %s | reason=SETUP_MAX_MINUTES | setup_time=%s | expires_at=%s",
+                        expired_setup.symbol, expired_setup.created_at, expired_setup.expires_at,
+                    )
                     logger.info("%s", format_pending_expired(expired_setup, expiry_diagnostics))
 
                 strategy_b_pnl = strategy_b_paper_store.strategy_pnl_for_date(strategy_b_state.trading_date)
@@ -377,19 +507,28 @@ def main() -> int:
                 for setup in strategy_b_pending_store.pending():
                     try:
                         raw1 = broker.get_historical_data(setup.symbol, config.market.exchange_cash, "1")
+                        raw5 = broker.get_historical_data(setup.symbol, config.market.exchange_cash, "5")
+                        raw15 = broker.get_historical_data(setup.symbol, config.market.exchange_cash, "15")
                         df1 = normalize_ohlcv(raw1, setup.symbol, "1m")
+                        df5_setup = add_5m_indicators(normalize_ohlcv(raw5, setup.symbol, "5m"), strategy_settings)
+                        df15_setup = add_15m_indicators(normalize_ohlcv(raw15, setup.symbol, "15m"), strategy_settings)
                         c1 = latest_completed_candle(df1, 1)
                         df1 = df1.iloc[: c1.index + 1].copy()
-                        confirmation = evaluate_confirmation(
-                            setup, df1, getattr(config.execution, "strategy_b_max_adverse_atr_1m", 0.5)
+                        confirmation = evaluate_mtf_trigger(
+                            setup,
+                            df1,
+                            getattr(config.execution, "strategy_b_max_adverse_atr_1m", 0.5),
+                            df5_setup,
+                            df15_setup,
+                            strategy_settings,
                         )
-                        logger.info("%s", format_confirmation_check(setup, confirmation))
+                        logger.info("%s", format_mtf_check(setup, confirmation))
                         if confirmation.cancel:
                             mark_setup_cancelled(strategy_b_pending_store, setup, confirmation.reason)
-                            logger.info("[B] Pending setup cancelled | %s | reason=%s", setup.symbol, confirmation.reason)
+                            logger.info("[B] MTF SETUP CANCELLED | %s | reason=%s", setup.symbol, confirmation.reason)
                             continue
-                        if not confirmation.confirmed:
-                            logger.info("[B] Waiting for 1-minute confirmation | %s | reason=%s", setup.symbol, confirmation.reason)
+                        if not confirmation.triggered:
+                            logger.info("[B] Waiting for 1-minute trigger | %s | reason=%s", setup.symbol, confirmation.reason)
                             continue
 
                         strategy_b_open = strategy_b_paper_store.open_positions()
@@ -421,7 +560,7 @@ def main() -> int:
                             stop_price=setup.stop_price,
                             target_price=setup.target_price,
                         )
-                        logger.info("%s", format_confirmation_passed(setup, confirmation))
+                        logger.info("%s", format_mtf_trigger(setup, confirmation))
                         paper = strategy_b_paper_store.add_from_candidate(setup.symbol, setup.direction, setup.model, candidate)
                         mark_setup_executed(strategy_b_pending_store, setup, confirmation.close_price)
                         strategy_b_state.daily_trade_count += 1
@@ -431,7 +570,7 @@ def main() -> int:
                         strategy_b_paper_journal.append({
                             "event": "ENTRY", "trade_id": paper.trade_id, "underlying": setup.symbol, "direction": setup.direction,
                             "model": setup.model, "contract_symbol": paper.contract_symbol, "security_id": paper.security_id,
-                            "quantity": paper.initial_quantity, "price": paper.entry_price, "pnl": 0.0, "reason": "1M_CONFIRMATION",
+                            "quantity": paper.initial_quantity, "price": paper.entry_price, "pnl": 0.0, "reason": "1M_MTF_TRIGGER",
                             "open_quantity": paper.open_quantity, "entry_price": paper.entry_price, "stop_price": paper.stop_price,
                             "target_price": paper.target_price, "strategy_pnl": strategy_b_paper_store.strategy_pnl(),
                         })
@@ -492,6 +631,56 @@ def main() -> int:
                     processed_candles[symbol] = result.candle_time
                     diagnostics.append(result)
 
+                    if strategy_b_enabled:
+                        mtf_setup = evaluate_mtf_setup(symbol, df5, df15, hhmm, strategy_settings)
+                        if mtf_setup.decision != "NONE":
+                            if hhmm >= config.market.new_entry_cutoff:
+                                logger.info("[B] MTF setup skipped | %s | ENTRY_CUTOFF %s reached", symbol, config.market.new_entry_cutoff)
+                            elif strategy_b_pending_store.has_pending_symbol(symbol):
+                                logger.info("[B] MTF setup skipped | %s | PENDING_SETUP_ALREADY_OPEN", symbol)
+                            elif strategy_b_paper_store.has_open_underlying(symbol):
+                                logger.info("[B] MTF setup skipped | %s | PAPER_POSITION_ALREADY_OPEN", symbol)
+                            else:
+                                strategy_b_open = strategy_b_paper_store.open_positions()
+                                strategy_b_pnl = strategy_b_paper_store.strategy_pnl_for_date(strategy_b_state.trading_date)
+                                strategy_b_decision = risk.can_open_new_trade(
+                                    state=strategy_b_state,
+                                    managed_open_positions=len(strategy_b_open),
+                                    strategy_pnl=strategy_b_pnl,
+                                )
+                                if not strategy_b_decision.allowed:
+                                    logger.info("[B] MTF setup skipped | %s | risk=%s", symbol, strategy_b_decision.reason)
+                                else:
+                                    best_b = _select_best_contract(
+                                        logger=logger,
+                                        broker=broker,
+                                        resolver=resolver,
+                                        config=config,
+                                        scorer=scorer,
+                                        selector=selector,
+                                        exec_diag=exec_diag,
+                                        risk=risk,
+                                        state=strategy_b_state,
+                                        symbol=symbol,
+                                        direction=mtf_setup.direction,
+                                        model=mtf_setup.model,
+                                        score_pct=mtf_setup.score_pct,
+                                        underlying_price=float(mtf_setup.metrics["close_5m"]),
+                                        log_prefix="[B] ",
+                                        native_quote_debug_state=native_quote_debug_state,
+                                    )
+                                    if best_b is None:
+                                        logger.info("[B] MTF setup skipped | %s | NO_EXECUTABLE_CONTRACT", symbol)
+                                    else:
+                                        setup = strategy_b_pending_store.add_from_candidate(
+                                            mtf_setup, best_b, getattr(config.execution, "strategy_b_setup_max_minutes", 10)
+                                        )
+                                        logger.info(
+                                            "[B] MTF SETUP CREATED | %s | %s | context_15m=%s | score=%.0f | qty=%d | setup_price=%.2f | expires=%s | reasons=%s",
+                                            setup.symbol, setup.direction, setup.context_15m or "N/A", setup.setup_score,
+                                            setup.quantity, setup.signal_price, setup.expires_at, ",".join(setup.setup_reasons),
+                                        )
+
                     if result.decision == "NEAR":
                         near_signals += 1
                         trigger_detail = _entry_trigger_summary(result)
@@ -527,106 +716,24 @@ def main() -> int:
                     if strategy_a_reject_reason and not strategy_b_enabled:
                         continue
 
-                    contracts = []
-                    if resolver is not None:
-                        contracts = resolver.resolve(
-                            symbol, result.direction, float(result.metrics["close_5m"]),
-                            config.execution.nearby_strikes_each_side,
-                            preferred_exchange=config.execution.preferred_option_exchange,
-                        )
-                    if not contracts:
-                        contracts = broker.resolve_nearby_options_legacy(symbol, result.direction)
-                        if contracts:
-                            logger.info("%s resolver fallback: %d legacy contracts", symbol, len(contracts))
-                    else:
-                        logger.info("%s resolver: %d nearby contracts from instrument master", symbol, len(contracts))
-                    if not contracts:
-                        logger.warning("%s%s: no option contracts resolved", strategy_a_log_prefix, symbol)
-                        decision_audit.append(result, decision.reason, "ENTRY_REJECTED", "NO_OPTION_CONTRACTS")
-                        continue
-
-                    # Security-ID quotes are authoritative and bypass TradeHull's
-                    # symbol resolver.  This is the primary path for Dhan F&O.
-                    security_ids = [c.security_id for c in contracts if str(c.security_id).strip()]
-                    security_quote_payload = {}
-                    security_quote_error = None
-                    quote_segments = sorted({str(c.exchange_segment or "").strip() for c in contracts if str(c.exchange_segment or "").strip()})
-                    quote_segment = quote_segments[0] if len(quote_segments) == 1 else ""
-                    if len(quote_segments) > 1:
-                        logger.warning("%s resolver returned mixed quote segments: %s; execution fails closed", symbol, quote_segments)
-                    if security_ids and quote_segment:
-                        try:
-                            security_quote_payload = broker.get_quote_data_by_security_ids(
-                                security_ids, exchange_segment=quote_segment
-                            )
-                            if config.execution.native_quote_diagnostics and (
-                                not config.execution.native_quote_diagnostics_once or not native_quote_debug_done
-                            ):
-                                raw = repr(security_quote_payload)
-                                max_chars = int(config.execution.native_quote_diagnostics_max_chars)
-                                if len(raw) > max_chars:
-                                    raw = raw[:max_chars] + "...<truncated>"
-                                logger.warning(
-                                    "NATIVE_QUOTE_DEBUG | symbol=%s | segment=%s | requested_ids=%s | response_type=%s | raw=%s",
-                                    symbol, quote_segment, security_ids, type(security_quote_payload).__name__, raw,
-                                )
-                                native_quote_debug_done = True
-                        except Exception as exc:
-                            security_quote_error = str(exc)
-                            if config.execution.native_quote_diagnostics and (
-                                not config.execution.native_quote_diagnostics_once or not native_quote_debug_done
-                            ):
-                                logger.warning(
-                                    "NATIVE_QUOTE_DEBUG_EXCEPTION | symbol=%s | segment=%s | requested_ids=%s | exc_type=%s | error=%s",
-                                    symbol, quote_segment, security_ids, type(exc).__name__, exc,
-                                )
-                                native_quote_debug_done = True
-                            logger.warning("%s security-ID quote path unavailable: %s", symbol, exc)
-
-                    # Symbol based TradeHull calls remain only as a fallback for any
-                    # contract not returned by the native security-ID quote endpoint.
-                    query_symbols = [broker.quote_symbol(c) for c in contracts]
-                    symbol_quote_payload = None
-                    ltp_payload = None
-                    accepted = []
-                    capital = risk.capital_for_trade(risk.strategy_capital_base(state))
-
-                    for contract in contracts:
-                        broker_symbol = broker.quote_symbol(contract)
-                        quote_source = "DHAN_SECURITY_ID"
-                        quote = parse_quote_response(security_quote_payload, str(contract.security_id))
-
-                        if quote.ltp is None and quote.bid is None and quote.ask is None:
-                            # Sprint 3.3 fails closed for execution-quality data.
-                            # TradeHull symbol APIs are intentionally not used to score
-                            # an option after the native security-ID quote path fails.
-                            quote_source = "NATIVE_DHAN_UNAVAILABLE"
-
-                        # Preserve the quote source in the immutable snapshot.
-                        quote = type(quote)(**{**quote.__dict__, "source": quote_source})
-
-                        try:
-                            lot_size = broker.lot_size_for_contract(contract)
-                        except Exception:
-                            lot_size = int(contract.lot_size or 0)
-
-                        assessment = scorer.assess(quote, lot_size)
-                        candidate = selector.build_candidate(contract, quote, lot_size, capital, assessment)
-                        exec_diag.append_assessment(
-                            symbol, result.direction, result.model, result.score_pct, contract, quote, assessment,
-                            lot_size, candidate, broker_symbol=broker_symbol,
-                        )
-                        spread_text = "N/A" if assessment.spread_pct is None else f"{assessment.spread_pct:.1f}%"
-                        logger.info(
-                            "%s | master=%s | broker=%s | exch=%s/%s | sec=%s | strike=%s | quote=%s | grade=%s health=%.0f conf=%s spread=%s | %s",
-                            symbol, contract.trading_symbol, broker_symbol, contract.exchange_id or "N/A", contract.exchange_segment or "N/A", contract.security_id or "N/A",
-                            contract.strike, quote_source, assessment.grade, assessment.health_score, assessment.confidence,
-                            spread_text, ("ACCEPT" if candidate else "REJECT: " + (",".join(assessment.reasons) if assessment.reasons else "NOT_EXECUTABLE")),
-                        )
-                        if candidate:
-                            accepted.append(candidate)
-
-                    best = selector.choose_best(accepted)
+                    best = _select_best_contract(
+                        logger=logger,
+                        broker=broker,
+                        resolver=resolver,
+                        config=config,
+                        scorer=scorer,
+                        selector=selector,
+                        exec_diag=exec_diag,
+                        risk=risk,
+                        state=state,
+                        symbol=symbol,
+                        direction=result.direction,
+                        model=result.model,
+                        score_pct=result.score_pct,
+                        underlying_price=float(result.metrics["close_5m"]),
+                        log_prefix=strategy_a_log_prefix,
+                        native_quote_debug_state=native_quote_debug_state,
+                    )
                     if best is None:
                         logger.info("%s%s: no contract passed verified-data execution threshold", strategy_a_log_prefix, symbol)
                         decision_audit.append(result, decision.reason, "ENTRY_REJECTED", "NO_EXECUTABLE_CONTRACT")
@@ -651,21 +758,6 @@ def main() -> int:
                             best.quantity, best.entry_limit, best.target_price, best.stop_price, paper.trade_id,
                         )
                         decision_audit.append(result, decision.reason, "ENTRY_ACCEPTED", "OK")
-                    if strategy_b_enabled:
-                        if strategy_b_pending_store.has_pending_symbol(symbol):
-                            logger.info("[B] Pending setup skipped | %s | PENDING_SETUP_ALREADY_OPEN", symbol)
-                        elif strategy_b_paper_store.has_open_underlying(symbol):
-                            logger.info("[B] Pending setup skipped | %s | PAPER_POSITION_ALREADY_OPEN", symbol)
-                        else:
-                            setup = strategy_b_pending_store.add_from_candidate(
-                                result, best, getattr(config.execution, "strategy_b_pending_expiry_minutes", 5)
-                            )
-                            logger.info(
-                                "[B] Pending setup created | %s | %s | %s | qty %d | signal %.2f | expires=%s",
-                                setup.symbol, setup.direction, setup.model, setup.quantity,
-                                setup.signal_price, setup.expires_at,
-                            )
-
                 except Exception as exc:
                     logger.warning("Skipping %s: %s", symbol, exc)
 
