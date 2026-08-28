@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from core.strategy_b import MARKET_TZ, MTFSetupResult, MTFTriggerResult, _parse_dt, _timestamp, evaluate_mtf_setup, evaluate_mtf_trigger
+from core.strategy_b import MTFSetupResult, MTFTriggerResult, _latest_completed_index, evaluate_mtf_setup, evaluate_mtf_trigger
 
 
 @dataclass(frozen=True)
@@ -107,7 +107,11 @@ def context_15m_source(df_15m: pd.DataFrame, trading_date: str) -> str:
     out = out.dropna(subset=["datetime_parsed"]).sort_values("datetime_parsed")
     if out.empty:
         return "UNKNOWN_15M"
-    latest = out.iloc[-1]["datetime_parsed"]
+    try:
+        idx, _ = _latest_completed_index(out, 15)
+        latest = out.iloc[idx]["datetime_parsed"]
+    except Exception:
+        latest = out.iloc[-1]["datetime_parsed"]
     return "CURRENT_SESSION_15M" if latest.date() == pd.Timestamp(trading_date).date() else "PREVIOUS_SESSION_15M"
 
 

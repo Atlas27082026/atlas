@@ -87,6 +87,14 @@ class StrategyCTests(unittest.TestCase):
         self.assertEqual(context_15m_source(previous, "2026-08-31"), "PREVIOUS_SESSION_15M")
         self.assertEqual(context_15m_source(current, "2026-08-31"), "CURRENT_SESSION_15M")
 
+    def test_incomplete_current_15m_does_not_take_over(self):
+        current_forming = pd.DataFrame([
+            {"datetime_parsed": pd.Timestamp("2026-08-28 15:15")},
+            {"datetime_parsed": pd.Timestamp.now()},
+        ])
+
+        self.assertEqual(context_15m_source(current_forming, "2026-08-31"), "PREVIOUS_SESSION_15M")
+
     def test_opening_pullback_behavior(self):
         behavior = classify_opening_behavior(
             stock_gap_pct_value=2.0,
