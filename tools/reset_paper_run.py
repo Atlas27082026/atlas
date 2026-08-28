@@ -39,6 +39,13 @@ def _write_json(path: Path, payload: dict) -> None:
     tmp.replace(path)
 
 
+def _display_path(path: Path, base_dir: Path) -> str:
+    try:
+        return str(path.relative_to(base_dir))
+    except ValueError:
+        return str(path)
+
+
 def reset_paper_run(
     *,
     base_dir: Path = BASE_DIR,
@@ -65,24 +72,24 @@ def reset_paper_run(
             if src.exists():
                 dst = backup_dir / name
                 shutil.copy2(src, dst)
-                actions.append(f"BACKED_UP {src} -> {dst}")
+                actions.append(f"BACKED_UP {_display_path(src, base_dir)} -> {_display_path(dst, base_dir)}")
 
     trading_date = now.date().isoformat()
     for name in ("daily_state.json", "daily_state_strategy_b.json", "daily_state_strategy_c.json"):
         path = state_dir / name
         balance = _read_balance(path)
         _write_json(path, asdict(DailyState(trading_date=trading_date, session_start_balance=balance)))
-        actions.append(f"RESET {path}")
+        actions.append(f"RESET {_display_path(path, base_dir)}")
 
     for name in ("paper_positions.json", "paper_positions_strategy_b.json", "paper_positions_strategy_c.json"):
         path = state_dir / name
         _write_json(path, {"positions": []})
-        actions.append(f"RESET {path}")
+        actions.append(f"RESET {_display_path(path, base_dir)}")
 
     for name in ("pending_setups_strategy_b.json", "pending_setups_strategy_c.json"):
         path = state_dir / name
         _write_json(path, {"setups": []})
-        actions.append(f"RESET {path}")
+        actions.append(f"RESET {_display_path(path, base_dir)}")
 
     return actions
 
