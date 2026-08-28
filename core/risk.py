@@ -23,6 +23,17 @@ class RiskManager:
     def daily_loss_limit(self, state: DailyState) -> float:
         return self.strategy_capital_base(state) * self.config.risk.daily_max_loss_pct
 
+    def effective_trade_limits(self) -> tuple[int, int]:
+        risk = self.config.risk
+        execution = self.config.execution
+        research_mode = bool(risk.dry_run and getattr(risk, "paper_ignore_daily_loss_lock", False))
+        if research_mode:
+            return (
+                int(getattr(execution, "paper_research_max_daily_trades", risk.max_daily_trades)),
+                int(getattr(execution, "paper_research_max_open_positions", risk.max_open_positions)),
+            )
+        return int(risk.max_daily_trades), int(risk.max_open_positions)
+
     def can_open_new_trade(
         self,
         state: DailyState,
@@ -41,10 +52,12 @@ class RiskManager:
             risk.dry_run and getattr(risk, "paper_ignore_daily_loss_lock", False)
         )
 
-        if state.daily_trade_count >= risk.max_daily_trades:
+        max_daily_trades, max_open_positions = self.effective_trade_limits()
+
+        if state.daily_trade_count >= max_daily_trades:
             return RiskDecision(False, "MAX_DAILY_TRADES")
 
-        if managed_open_positions >= risk.max_open_positions:
+        if managed_open_positions >= max_open_positions:
             return RiskDecision(False, "MAX_MANAGED_OPEN_POSITIONS")
 
         if state.consecutive_losses >= risk.max_consecutive_losses:

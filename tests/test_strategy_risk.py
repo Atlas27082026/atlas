@@ -84,16 +84,38 @@ class StrategyRiskTests(unittest.TestCase):
             trading_date="2099-01-01",
             session_start_balance=150000,
             daily_loss_locked=True,
-            daily_trade_count=1,
+            daily_trade_count=50,
         )
         max_trades = risk.can_open_new_trade(locked, managed_open_positions=0, strategy_pnl=-2300.0)
         self.assertFalse(max_trades.allowed)
         self.assertEqual(max_trades.reason, "MAX_DAILY_TRADES")
 
         locked.daily_trade_count = 0
-        max_open = risk.can_open_new_trade(locked, managed_open_positions=1, strategy_pnl=-2300.0)
+        max_open = risk.can_open_new_trade(locked, managed_open_positions=5, strategy_pnl=-2300.0)
         self.assertFalse(max_open.allowed)
         self.assertEqual(max_open.reason, "MAX_MANAGED_OPEN_POSITIONS")
+
+    def test_paper_research_limits_do_not_apply_in_live_mode(self):
+        cfg = AppConfig(risk=RiskConfig(
+            dry_run=False,
+            paper_ignore_daily_loss_lock=True,
+            max_daily_trades=5,
+            max_open_positions=2,
+        ))
+        risk = RiskManager(cfg)
+
+        self.assertEqual(risk.effective_trade_limits(), (5, 2))
+
+    def test_paper_research_limits_apply_only_in_dry_run_research(self):
+        cfg = AppConfig(risk=RiskConfig(
+            dry_run=True,
+            paper_ignore_daily_loss_lock=True,
+            max_daily_trades=5,
+            max_open_positions=2,
+        ))
+        risk = RiskManager(cfg)
+
+        self.assertEqual(risk.effective_trade_limits(), (50, 5))
 
     def test_daily_loss_lock_is_persisted_for_same_trading_day(self):
         with tempfile.TemporaryDirectory() as td:
