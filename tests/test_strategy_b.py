@@ -1,8 +1,9 @@
 import tempfile
 import unittest
-from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -21,6 +22,9 @@ from core.strategy_b import (
     strategy_b_summary_report,
 )
 from execution.models import ContractCandidate, LiquidityAssessment, QuoteSnapshot
+
+
+MARKET_TZ = ZoneInfo("Asia/Kolkata")
 
 
 def _candidate():
@@ -124,6 +128,89 @@ class StrategyBTests(unittest.TestCase):
         self.assertEqual(result.reason, "CONFIRMATION_SATISFIED")
         self.assertIsNotNone(result.diagnostics)
         self.assertTrue(result.diagnostics.trigger_cross)
+
+    def test_aware_signal_and_current_time_do_not_crash(self):
+        setup = PendingSetupStore(Path(tempfile.mkdtemp()) / "pending.json").add_from_candidate(
+            _signal(), _candidate(), expiry_minutes=5
+        )
+        setup.signal_timestamp = "2026-08-28T10:00:00+05:30"
+        setup.created_at = "2026-08-28T10:00:00+05:30"
+        setup.expires_at = "2026-08-28T10:05:00+05:30"
+        df = pd.DataFrame([
+            {"datetime_parsed": pd.Timestamp("2026-08-28T10:00:00+05:30"), "open": 99.0, "high": 100.0, "low": 98.5, "close": 99.5, "volume": 1000},
+            {"datetime_parsed": pd.Timestamp("2026-08-28T10:01:00+05:30"), "open": 99.6, "high": 101.0, "low": 99.5, "close": 100.5, "volume": 1200},
+        ])
+
+        result = evaluate_confirmation(setup, df, max_adverse_atr=2.0)
+
+        self.assertTrue(result.confirmed)
+        self.assertEqual(result.diagnostics.elapsed_seconds, 60)
+        self.assertEqual(result.diagnostics.expires_in_seconds, 240)
+
+    def test_legacy_naive_signal_with_aware_current_time_do_not_crash(self):
+        setup = PendingSetupStore(Path(tempfile.mkdtemp()) / "pending.json").add_from_candidate(
+            _signal(), _candidate(), expiry_minutes=5
+        )
+        setup.signal_timestamp = "2026-08-28T10:00:00"
+        setup.created_at = "2026-08-28T10:00:00"
+        setup.expires_at = "2026-08-28T10:05:00"
+        df = pd.DataFrame([
+            {"datetime_parsed": pd.Timestamp("2026-08-28T10:00:00+05:30"), "open": 99.0, "high": 100.0, "low": 98.5, "close": 99.5, "volume": 1000},
+            {"datetime_parsed": pd.Timestamp("2026-08-28T10:01:00+05:30"), "open": 99.6, "high": 101.0, "low": 99.5, "close": 100.5, "volume": 1200},
+        ])
+
+        result = evaluate_confirmation(setup, df, max_adverse_atr=2.0)
+
+        self.assertTrue(result.confirmed)
+        self.assertEqual(result.diagnostics.elapsed_seconds, 60)
+
+    def test_legacy_naive_pending_setup_is_normalized_on_load(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = PendingSetupStore(Path(td) / "pending.json")
+            setup = store.add_from_candidate(_signal(), _candidate(), expiry_minutes=5)
+            setup.signal_timestamp = "2026-08-28T10:00:00"
+            setup.created_at = "2026-08-28T10:00:00"
+            setup.expires_at = "2026-08-28T10:05:00"
+            store.save([setup])
+
+            loaded = store.load()[0]
+
+            self.assertTrue(loaded.signal_timestamp.endswith("+05:30"))
+            self.assertTrue(loaded.created_at.endswith("+05:30"))
+            self.assertTrue(loaded.expires_at.endswith("+05:30"))
+
+    def test_expiry_calculation_handles_aware_now(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = PendingSetupStore(Path(td) / "pending.json")
+            setup = store.add_from_candidate(_signal(), _candidate(), expiry_minutes=5)
+            setup.created_at = "2026-08-28T10:00:00"
+            setup.expires_at = "2026-08-28T10:05:00"
+            store.save([setup])
+
+            expired = expire_pending_setups(
+                store,
+                now=datetime(2026, 8, 28, 10, 6, tzinfo=MARKET_TZ),
+            )
+
+            self.assertEqual(len(expired), 1)
+            self.assertTrue(expired[0].resolved_at.endswith("+05:30"))
+
+    def test_elapsed_and_confirmation_delay_are_timezone_consistent(self):
+        setup = PendingSetupStore(Path(tempfile.mkdtemp()) / "pending.json").add_from_candidate(
+            _signal(), _candidate(), expiry_minutes=5
+        )
+        setup.signal_timestamp = "2026-08-28T10:00:00"
+        setup.created_at = "2026-08-28T10:00:30"
+        setup.expires_at = "2026-08-28T10:05:30"
+        df = pd.DataFrame([
+            {"datetime_parsed": pd.Timestamp("2026-08-28T10:00:00+05:30"), "open": 99.0, "high": 100.0, "low": 98.5, "close": 99.5, "volume": 1000},
+            {"datetime_parsed": pd.Timestamp("2026-08-28T10:01:30+05:30"), "open": 99.6, "high": 101.0, "low": 99.5, "close": 100.5, "volume": 1200},
+        ])
+
+        result = evaluate_confirmation(setup, df, max_adverse_atr=2.0)
+
+        self.assertEqual(result.diagnostics.elapsed_seconds, 60)
+        self.assertEqual(result.diagnostics.delay_seconds, 60)
 
     def test_cancellation_when_trend_invalidated(self):
         setup = PendingSetupStore(Path(tempfile.mkdtemp()) / "pending.json").add_from_candidate(
