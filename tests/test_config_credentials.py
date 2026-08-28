@@ -35,8 +35,11 @@ class ConfigCredentialTests(unittest.TestCase):
         cfg = ExecutionConfig()
 
         self.assertFalse(cfg.enable_strategy_b)
+        self.assertFalse(cfg.enable_strategy_c)
         self.assertFalse(cfg.native_quote_diagnostics)
         self.assertEqual(cfg.strategy_b_setup_max_minutes, 10)
+        self.assertEqual(cfg.paper_research_max_daily_trades, 50)
+        self.assertEqual(cfg.paper_research_max_open_positions, 5)
 
 
 if __name__ == "__main__":

@@ -19,11 +19,12 @@ class VersionIdentityTests(unittest.TestCase):
             identity = build_run_identity(config, base, trading_date="2026-08-31")
 
             self.assertEqual(identity.version, "4.4.0")
-            self.assertEqual(identity.run, "RUN 4")
+            self.assertEqual(identity.run, "RUN 5")
             self.assertEqual(identity.mode, "PAPER")
             self.assertEqual(identity.strategy_a, "IMMEDIATE_5M_BASELINE")
             self.assertEqual(identity.strategy_b, "MTF_15M_5M_1M")
-            self.assertEqual(identity.run_id, "run_4_20260831")
+            self.assertEqual(identity.strategy_c, "REGIME_MTF_15M_5M_1M")
+            self.assertEqual(identity.run_id, "run_5_20260831")
 
     def test_startup_banner_contains_run_context(self):
         config = SimpleNamespace(
@@ -35,9 +36,10 @@ class VersionIdentityTests(unittest.TestCase):
         text = startup_banner(identity)
 
         self.assertIn("ATLAS TRADING ENGINE", text)
-        self.assertIn("Run          : RUN 4", text)
+        self.assertIn("Run          : RUN 5", text)
         self.assertIn("Mode         : PAPER", text)
         self.assertIn("Strategy B   : MTF_15M_5M_1M", text)
+        self.assertIn("Strategy C   : REGIME_MTF_15M_5M_1M", text)
         self.assertIn("Trading Date : 2026-08-31", text)
 
 

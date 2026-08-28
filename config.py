@@ -102,10 +102,17 @@ class ExecutionConfig:
     paper_partial_exit_fraction: float = 0.50
     paper_trailing_pct: float = 0.05
     enable_strategy_b: bool = False
+    enable_strategy_c: bool = False
     strategy_b_pending_expiry_minutes: int = 5
     strategy_b_setup_max_minutes: int = 10
     strategy_b_monitor_interval_seconds: int = 60
     strategy_b_max_adverse_atr_1m: float = 0.5
+    strategy_c_market_reference: str = "NIFTY"
+    strategy_c_opening_window_start: str = "09:15"
+    strategy_c_opening_window_end: str = "09:45"
+    strategy_c_previous_session_15m_policy: str = "ALLOW_WITH_OPENING_CONFIRMATION"
+    paper_research_max_daily_trades: int = 50
+    paper_research_max_open_positions: int = 5
 
 
 @dataclass(frozen=True)

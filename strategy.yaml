@@ -103,6 +103,17 @@ strategy:
     setup_require_session_vwap: true
     setup_require_supertrend: false
 
+  strategy_c_regime:
+    normal_gap_pct: 0.30
+    small_gap_pct: 0.75
+    medium_gap_pct: 1.50
+    relative_strength_pct: 0.35
+    strong_relative_strength_pct: 1.00
+    gap_fill_attempt_pct: 0.40
+    pullback_min_pct: 0.15
+    opening_reclaim_buffer_pct: 0.02
+    require_pullback_for_medium_large_gap_chase: true
+
   scoring:
     near_signal_pct: 80.0
     weights:
