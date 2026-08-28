@@ -236,18 +236,24 @@ def main() -> int:
     scorer = LiquidityScorer(config)
 
     day = datetime.now().strftime("%Y-%m-%d")
-    diagnostics = DiagnosticsWriter(DATA_DIR / day / "diagnostics.csv")
-    exec_diag = ExecutionDiagnostics(DATA_DIR / day / "execution_candidates.csv")
-    decision_audit = DecisionAuditWriter(DATA_DIR / day / "decision_audit.csv")
-    paper_journal = CsvJournal(DATA_DIR / day / "paper_trade_journal.csv", [
+    run_id = run_identity.run_id
+    diagnostics = DiagnosticsWriter(DATA_DIR / f"{run_id}_diagnostics.csv")
+    exec_diag = ExecutionDiagnostics(DATA_DIR / f"{run_id}_execution_candidates.csv")
+    decision_audit = DecisionAuditWriter(DATA_DIR / f"{run_id}_decisions.csv")
+    paper_journal = CsvJournal(DATA_DIR / f"{run_id}_strategy_a_trades.csv", [
         "timestamp", "event", "trade_id", "underlying", "direction", "model",
         "contract_symbol", "security_id", "quantity", "price", "pnl", "reason",
         "open_quantity", "entry_price", "stop_price", "target_price", "strategy_pnl"
     ])
-    strategy_b_paper_journal = CsvJournal(DATA_DIR / day / "paper_trade_journal_strategy_b.csv", [
+    strategy_b_paper_journal = CsvJournal(DATA_DIR / f"{run_id}_strategy_b_trades.csv", [
         "timestamp", "event", "trade_id", "underlying", "direction", "model",
         "contract_symbol", "security_id", "quantity", "price", "pnl", "reason",
         "open_quantity", "entry_price", "stop_price", "target_price", "strategy_pnl"
+    ]) if strategy_b_enabled else None
+    strategy_b_setup_journal = CsvJournal(DATA_DIR / f"{run_id}_strategy_b_setups.csv", [
+        "timestamp", "event", "setup_id", "symbol", "direction", "model",
+        "context_15m", "setup_5m", "setup_score", "price", "reason",
+        "delay_seconds", "extension_atr", "allowed_extension_atr",
     ]) if strategy_b_enabled else None
 
     resolver = None
@@ -490,6 +496,13 @@ def main() -> int:
                         "[B] MTF SETUP EXPIRED | %s | reason=SETUP_MAX_MINUTES | setup_time=%s | expires_at=%s",
                         expired_setup.symbol, expired_setup.created_at, expired_setup.expires_at,
                     )
+                    strategy_b_setup_journal.append({
+                        "event": "EXPIRED", "setup_id": expired_setup.setup_id, "symbol": expired_setup.symbol,
+                        "direction": expired_setup.direction, "model": expired_setup.model,
+                        "context_15m": expired_setup.context_15m, "setup_5m": expired_setup.setup_5m,
+                        "setup_score": expired_setup.setup_score, "price": expired_setup.signal_price,
+                        "reason": "SETUP_MAX_MINUTES",
+                    })
                     logger.info("%s", format_pending_expired(expired_setup, expiry_diagnostics))
 
                 strategy_b_pnl = strategy_b_paper_store.strategy_pnl_for_date(strategy_b_state.trading_date)
@@ -526,6 +539,12 @@ def main() -> int:
                         if confirmation.cancel:
                             mark_setup_cancelled(strategy_b_pending_store, setup, confirmation.reason)
                             logger.info("[B] MTF SETUP CANCELLED | %s | reason=%s", setup.symbol, confirmation.reason)
+                            strategy_b_setup_journal.append({
+                                "event": "CANCELLED", "setup_id": setup.setup_id, "symbol": setup.symbol,
+                                "direction": setup.direction, "model": setup.model, "context_15m": setup.context_15m,
+                                "setup_5m": setup.setup_5m, "setup_score": setup.setup_score,
+                                "price": confirmation.close_price, "reason": confirmation.reason,
+                            })
                             continue
                         if not confirmation.triggered:
                             logger.info("[B] Waiting for 1-minute trigger | %s | reason=%s", setup.symbol, confirmation.reason)
@@ -563,6 +582,17 @@ def main() -> int:
                         logger.info("%s", format_mtf_trigger(setup, confirmation))
                         paper = strategy_b_paper_store.add_from_candidate(setup.symbol, setup.direction, setup.model, candidate)
                         mark_setup_executed(strategy_b_pending_store, setup, confirmation.close_price)
+                        delay_seconds = confirmation.diagnostics.delay_seconds if confirmation.diagnostics else ""
+                        extension_atr = confirmation.diagnostics.extension_atr if confirmation.diagnostics else ""
+                        allowed_extension = confirmation.diagnostics.allowed_extension_atr if confirmation.diagnostics else ""
+                        strategy_b_setup_journal.append({
+                            "event": "TRIGGERED", "setup_id": setup.setup_id, "symbol": setup.symbol,
+                            "direction": setup.direction, "model": setup.model, "context_15m": setup.context_15m,
+                            "setup_5m": setup.setup_5m, "setup_score": setup.setup_score,
+                            "price": confirmation.close_price, "reason": confirmation.reason,
+                            "delay_seconds": delay_seconds, "extension_atr": extension_atr,
+                            "allowed_extension_atr": allowed_extension,
+                        })
                         strategy_b_state.daily_trade_count += 1
                         if setup.symbol not in strategy_b_state.traded_underlyings:
                             strategy_b_state.traded_underlyings.append(setup.symbol)
@@ -680,6 +710,13 @@ def main() -> int:
                                             setup.symbol, setup.direction, setup.context_15m or "N/A", setup.setup_score,
                                             setup.quantity, setup.signal_price, setup.expires_at, ",".join(setup.setup_reasons),
                                         )
+                                        strategy_b_setup_journal.append({
+                                            "event": "CREATED", "setup_id": setup.setup_id, "symbol": setup.symbol,
+                                            "direction": setup.direction, "model": setup.model,
+                                            "context_15m": setup.context_15m, "setup_5m": setup.setup_5m,
+                                            "setup_score": setup.setup_score, "price": setup.signal_price,
+                                            "reason": ",".join(setup.setup_reasons),
+                                        })
 
                     if result.decision == "NEAR":
                         near_signals += 1

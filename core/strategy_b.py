@@ -142,17 +142,25 @@ class MTFTriggerResult:
 
 @dataclass(frozen=True)
 class StrategyStats:
-    trades: int
-    wins: int
-    losses: int
-    win_rate: float
-    net_pnl: float
-    profit_factor: float
-    expectancy: float
+    signals: int = 0
+    trades: int = 0
+    wins: int = 0
+    losses: int = 0
+    win_rate: float = 0.0
+    net_pnl: float = 0.0
+    profit_factor: float = 0.0
+    expectancy: float = 0.0
     pending_setups: int = 0
+    triggers: int = 0
     executed: int = 0
     expired: int = 0
     cancelled: int = 0
+    invalidated: int = 0
+    target1_hits: int = 0
+    stop_exits: int = 0
+    other_exits: int = 0
+    avg_winner: float = 0.0
+    avg_loser: float = 0.0
     average_entry_delay: float = 0.0
     average_entry_improvement: float = 0.0
     average_wait_before_expiry: float = 0.0
@@ -834,9 +842,28 @@ def compute_strategy_stats(paper_store, pending_store: Optional[PendingSetupStor
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0 if gross_profit == 0 else float("inf")
     win_rate = (wins / trades) * 100.0 if trades else 0.0
     expectancy = net_pnl / trades if trades else 0.0
+    target1_hits = sum(1 for p in positions if getattr(p, "target1_hit", False))
+    stop_exits = sum(1 for p in closed if str(getattr(p, "exit_reason", "")).upper() == "STOP")
+    other_exits = sum(1 for p in closed if str(getattr(p, "exit_reason", "")).upper() not in {"", "STOP"})
+    avg_winner = gross_profit / wins if wins else 0.0
+    avg_loser = -(gross_loss / losses) if losses else 0.0
 
     if pending_store is None:
-        return StrategyStats(trades, wins, losses, round(win_rate, 2), round(net_pnl, 2), round(profit_factor, 4), round(expectancy, 2))
+        return StrategyStats(
+            signals=trades,
+            trades=trades,
+            wins=wins,
+            losses=losses,
+            win_rate=round(win_rate, 2),
+            net_pnl=round(net_pnl, 2),
+            profit_factor=round(profit_factor, 4),
+            expectancy=round(expectancy, 2),
+            target1_hits=target1_hits,
+            stop_exits=stop_exits,
+            other_exits=other_exits,
+            avg_winner=round(avg_winner, 2),
+            avg_loser=round(avg_loser, 2),
+        )
 
     setups = pending_store.load()
     if trading_date:
@@ -870,9 +897,16 @@ def compute_strategy_stats(paper_store, pending_store: Optional[PendingSetupStor
         profit_factor=round(profit_factor, 4),
         expectancy=round(expectancy, 2),
         pending_setups=len(setups),
+        triggers=len(executed),
         executed=len(executed),
         expired=len(expired),
         cancelled=sum(1 for s in setups if s.status == "CANCELLED"),
+        invalidated=sum(1 for s in setups if s.status == "CANCELLED" and "INVALID" in str(s.exit_reason).upper()),
+        target1_hits=target1_hits,
+        stop_exits=stop_exits,
+        other_exits=other_exits,
+        avg_winner=round(avg_winner, 2),
+        avg_loser=round(avg_loser, 2),
         average_entry_delay=round(sum(delays) / len(delays), 2) if delays else 0.0,
         average_entry_improvement=round(sum(improvements) / len(improvements), 4) if improvements else 0.0,
         average_wait_before_expiry=round(sum(expiry_waits) / len(expiry_waits), 2) if expiry_waits else 0.0,
@@ -882,16 +916,20 @@ def compute_strategy_stats(paper_store, pending_store: Optional[PendingSetupStor
 def comparison_report(strategy_a: StrategyStats, strategy_b: StrategyStats) -> str:
     return (
         "Strategy A | "
-        f"Trades={strategy_a.trades} | Wins={strategy_a.wins} | Losses={strategy_a.losses} | "
+        f"Signals={strategy_a.signals} | Entries={strategy_a.trades} | Wins={strategy_a.wins} | Losses={strategy_a.losses} | "
+        f"Target1={strategy_a.target1_hits} | Stops={strategy_a.stop_exits} | Other Exits={strategy_a.other_exits} | "
         f"Win Rate={strategy_a.win_rate:.2f}% | Net P&L={strategy_a.net_pnl:.2f} | "
+        f"Avg Winner={strategy_a.avg_winner:.2f} | Avg Loser={strategy_a.avg_loser:.2f} | "
         f"Profit Factor={strategy_a.profit_factor:.4f} | Expectancy={strategy_a.expectancy:.2f}\n"
         "Strategy B | "
-        f"Pending Setups={strategy_b.pending_setups} | Executed={strategy_b.executed} | "
-        f"Expired={strategy_b.expired} | Cancelled={strategy_b.cancelled} | "
-        f"Trades={strategy_b.trades} | Wins={strategy_b.wins} | Losses={strategy_b.losses} | "
+        f"Setups={strategy_b.pending_setups} | 1m Triggers={strategy_b.triggers} | Entries={strategy_b.trades} | "
+        f"Expired={strategy_b.expired} | Invalidated={strategy_b.invalidated} | Cancelled={strategy_b.cancelled} | "
+        f"Wins={strategy_b.wins} | Losses={strategy_b.losses} | Target1={strategy_b.target1_hits} | "
+        f"Stops={strategy_b.stop_exits} | Other Exits={strategy_b.other_exits} | "
         f"Win Rate={strategy_b.win_rate:.2f}% | Net P&L={strategy_b.net_pnl:.2f} | "
+        f"Avg Winner={strategy_b.avg_winner:.2f} | Avg Loser={strategy_b.avg_loser:.2f} | "
         f"Profit Factor={strategy_b.profit_factor:.4f} | Expectancy={strategy_b.expectancy:.2f} | "
-        f"Average Entry Delay={strategy_b.average_entry_delay:.2f}s | "
+        f"Average Trigger Delay={strategy_b.average_entry_delay:.2f}s | "
         f"Average Entry Improvement={strategy_b.average_entry_improvement:.4f}"
     )
 
