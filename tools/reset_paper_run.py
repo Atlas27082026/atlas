@@ -15,9 +15,12 @@ from core.state import DailyState
 STATE_FILES = (
     "daily_state.json",
     "daily_state_strategy_b.json",
+    "daily_state_strategy_c.json",
     "paper_positions.json",
     "paper_positions_strategy_b.json",
+    "paper_positions_strategy_c.json",
     "pending_setups_strategy_b.json",
+    "pending_setups_strategy_c.json",
 )
 
 
@@ -65,20 +68,21 @@ def reset_paper_run(
                 actions.append(f"BACKED_UP {src} -> {dst}")
 
     trading_date = now.date().isoformat()
-    for name in ("daily_state.json", "daily_state_strategy_b.json"):
+    for name in ("daily_state.json", "daily_state_strategy_b.json", "daily_state_strategy_c.json"):
         path = state_dir / name
         balance = _read_balance(path)
         _write_json(path, asdict(DailyState(trading_date=trading_date, session_start_balance=balance)))
         actions.append(f"RESET {path}")
 
-    for name in ("paper_positions.json", "paper_positions_strategy_b.json"):
+    for name in ("paper_positions.json", "paper_positions_strategy_b.json", "paper_positions_strategy_c.json"):
         path = state_dir / name
         _write_json(path, {"positions": []})
         actions.append(f"RESET {path}")
 
-    path = state_dir / "pending_setups_strategy_b.json"
-    _write_json(path, {"setups": []})
-    actions.append(f"RESET {path}")
+    for name in ("pending_setups_strategy_b.json", "pending_setups_strategy_c.json"):
+        path = state_dir / name
+        _write_json(path, {"setups": []})
+        actions.append(f"RESET {path}")
 
     return actions
 

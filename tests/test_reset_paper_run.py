@@ -28,17 +28,22 @@ class ResetPaperRunTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (state / "paper_positions.json").write_text(json.dumps({"positions": [{"trade_id": "old"}]}), encoding="utf-8")
+            (state / "paper_positions_strategy_c.json").write_text(json.dumps({"positions": [{"trade_id": "old-c"}]}), encoding="utf-8")
             now = datetime(2026, 8, 31, 8, 0, 0)
 
             actions = reset_paper_run(base_dir=base, dry_run=True, backup=True, confirm=True, now=now)
 
             daily = json.loads((state / "daily_state.json").read_text(encoding="utf-8"))
             paper = json.loads((state / "paper_positions.json").read_text(encoding="utf-8"))
+            paper_c = json.loads((state / "paper_positions_strategy_c.json").read_text(encoding="utf-8"))
             backup = base / "runtime_data" / "paper_reset_backups" / "20260831_080000" / "paper_positions.json"
+            backup_c = base / "runtime_data" / "paper_reset_backups" / "20260831_080000" / "paper_positions_strategy_c.json"
             self.assertEqual(daily["trading_date"], "2026-08-31")
             self.assertEqual(daily["daily_trade_count"], 0)
             self.assertEqual(paper["positions"], [])
+            self.assertEqual(paper_c["positions"], [])
             self.assertTrue(backup.exists())
+            self.assertTrue(backup_c.exists())
             self.assertTrue(any("RESET" in action for action in actions))
 
 

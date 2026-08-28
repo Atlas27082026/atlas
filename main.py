@@ -31,6 +31,15 @@ from core.strategy_b import (
     mark_setup_executed,
     strategy_b_summary_report,
 )
+from core.strategy_c import (
+    evaluate_regime,
+    evaluate_strategy_c_setup,
+    evaluate_strategy_c_trigger,
+    format_regime_log,
+    format_strategy_c_check,
+    regime_permission,
+    strategy_c_summary_report,
+)
 from data.tradehull_client import TradeHullBroker
 from execution.contract_resolver import InstrumentMasterResolver
 from execution.diagnostics import ExecutionDiagnostics
@@ -224,16 +233,35 @@ def main() -> int:
     managed_store = ManagedPositionStore(STATE_DIR / "managed_positions.json")
     paper_store = PaperPositionStore(STATE_DIR / "paper_positions.json")
     strategy_b_enabled = bool(getattr(config.execution, "enable_strategy_b", False))
-    strategy_a_log_prefix = "[A] " if strategy_b_enabled else ""
+    strategy_c_enabled = bool(getattr(config.execution, "enable_strategy_c", False))
+    multi_strategy_enabled = strategy_b_enabled or strategy_c_enabled
+    strategy_a_log_prefix = "[A] " if multi_strategy_enabled else ""
     strategy_b_state_store = StateStore(STATE_DIR / "daily_state_strategy_b.json") if strategy_b_enabled else None
     strategy_b_state = strategy_b_state_store.load_or_create(balance) if strategy_b_state_store else None
     strategy_b_paper_store = PaperPositionStore(STATE_DIR / "paper_positions_strategy_b.json") if strategy_b_enabled else None
     strategy_b_pending_store = PendingSetupStore(STATE_DIR / "pending_setups_strategy_b.json") if strategy_b_enabled else None
+    strategy_c_state_store = StateStore(STATE_DIR / "daily_state_strategy_c.json") if strategy_c_enabled else None
+    strategy_c_state = strategy_c_state_store.load_or_create(balance) if strategy_c_state_store else None
+    strategy_c_paper_store = PaperPositionStore(STATE_DIR / "paper_positions_strategy_c.json") if strategy_c_enabled else None
+    strategy_c_pending_store = PendingSetupStore(STATE_DIR / "pending_setups_strategy_c.json") if strategy_c_enabled else None
     risk = RiskManager(config)
     scheduler = Scheduler(offset_seconds=config.market.scan_offset_seconds)
     engine = SignalEngine(strategy_settings)
     selector = ContractSelector(config)
     scorer = LiquidityScorer(config)
+    effective_daily_trades, effective_open_positions = risk.effective_trade_limits()
+    logger.info(
+        "RUN 5 config | Strategy A=ENABLED 5m immediate baseline | Strategy B=%s 15m->5m->1m | Strategy C=%s regime->15m->5m->adaptive 1m | Research daily-loss override=%s | Research max trades=%d | Research max open positions=%d | Market reference=%s | Opening regime window=%s-%s | Raw native quote logging=%s",
+        "ENABLED" if strategy_b_enabled else "DISABLED",
+        "ENABLED" if strategy_c_enabled else "DISABLED",
+        "ON" if config.risk.dry_run and config.risk.paper_ignore_daily_loss_lock else "OFF",
+        effective_daily_trades,
+        effective_open_positions,
+        config.execution.strategy_c_market_reference,
+        config.execution.strategy_c_opening_window_start,
+        config.execution.strategy_c_opening_window_end,
+        "ON" if config.execution.native_quote_diagnostics else "OFF",
+    )
 
     day = datetime.now().strftime("%Y-%m-%d")
     run_id = run_identity.run_id
@@ -255,6 +283,22 @@ def main() -> int:
         "context_15m", "setup_5m", "setup_score", "price", "reason",
         "delay_seconds", "extension_atr", "allowed_extension_atr",
     ]) if strategy_b_enabled else None
+    strategy_c_paper_journal = CsvJournal(DATA_DIR / f"{run_id}_strategy_c_trades.csv", [
+        "timestamp", "event", "trade_id", "underlying", "direction", "model",
+        "contract_symbol", "security_id", "quantity", "price", "pnl", "reason",
+        "open_quantity", "entry_price", "stop_price", "target_price", "strategy_pnl"
+    ]) if strategy_c_enabled else None
+    strategy_c_setup_journal = CsvJournal(DATA_DIR / f"{run_id}_strategy_c_setups.csv", [
+        "timestamp", "event", "setup_id", "symbol", "direction", "model",
+        "context_15m", "setup_5m", "setup_score", "price", "reason",
+        "delay_seconds", "extension_atr", "allowed_extension_atr",
+    ]) if strategy_c_enabled else None
+    strategy_c_regime_journal = CsvJournal(DATA_DIR / f"{run_id}_strategy_c_regimes.csv", [
+        "timestamp", "symbol", "trading_date", "market_gap_pct", "market_gap_class",
+        "market_direction", "stock_gap_pct", "stock_gap_class", "relative_gap_pct",
+        "relative_strength_class", "opening_behavior", "confidence", "regime",
+        "context_15m_source", "reasons",
+    ]) if strategy_c_enabled else None
 
     resolver = None
     configured_master = Path(config.execution.instrument_master_path).expanduser() if config.execution.instrument_master_path else None
@@ -322,9 +366,9 @@ def main() -> int:
     paper_open = paper_store.open_positions()
     logger.info(
         "%sPaper portfolio | open=%d | today's P&L=₹%.2f | cumulative P&L=₹%.2f | daily trades=%d/%d",
-        "[A] " if strategy_b_enabled else "",
+        "[A] " if multi_strategy_enabled else "",
         len(paper_open), paper_store.strategy_pnl_for_date(state.trading_date),
-        paper_store.strategy_pnl(), state.daily_trade_count, config.risk.max_daily_trades,
+        paper_store.strategy_pnl(), state.daily_trade_count, effective_daily_trades,
     )
     if strategy_b_enabled:
         strategy_b_open = strategy_b_paper_store.open_positions()
@@ -333,7 +377,16 @@ def main() -> int:
             len(strategy_b_pending_store.pending()), len(strategy_b_open),
             strategy_b_paper_store.strategy_pnl_for_date(strategy_b_state.trading_date),
             strategy_b_paper_store.strategy_pnl(), strategy_b_state.daily_trade_count,
-            config.risk.max_daily_trades,
+            effective_daily_trades,
+        )
+    if strategy_c_enabled:
+        strategy_c_open = strategy_c_paper_store.open_positions()
+        logger.info(
+            "[C] Paper portfolio | pending=%d | open=%d | today's P&L=₹%.2f | cumulative P&L=₹%.2f | daily trades=%d/%d",
+            len(strategy_c_pending_store.pending()), len(strategy_c_open),
+            strategy_c_paper_store.strategy_pnl_for_date(strategy_c_state.trading_date),
+            strategy_c_paper_store.strategy_pnl(), strategy_c_state.daily_trade_count,
+            effective_daily_trades,
         )
     logger.info("Execution path: normalized instrument master -> native Dhan security-ID quotes -> verified scoring; symbol quote fallback is diagnostics-only")
     native_diag = broker.native_dhan_diagnostic_info()
@@ -344,6 +397,7 @@ def main() -> int:
         ", ".join(native_diag.get("candidate_methods") or []) or "NONE",
     )
     native_quote_debug_state = {"done": False}
+    strategy_c_regimes_seen = []
 
     if not config.risk.dry_run:
         logger.error("Atlas %s %s is PAPER ONLY and intentionally refuses LIVE mode. Keep dry_run=True.", run_identity.version, run_identity.run)
@@ -369,6 +423,13 @@ def main() -> int:
                         ),
                     )
                     logger.info("\n%s", strategy_b_summary_report(strategy_b_stats))
+                if strategy_c_enabled:
+                    strategy_c_stats = compute_strategy_stats(
+                        strategy_c_paper_store,
+                        strategy_c_pending_store,
+                        strategy_c_state.trading_date,
+                    )
+                    logger.info("\n%s", strategy_c_summary_report(strategy_c_stats, strategy_c_regimes_seen))
                 logger.info("Market closed at %s. Atlas %s engine stopping.", hhmm, run_identity.version)
                 return 0
             if hhmm < config.market.market_open:
@@ -616,6 +677,187 @@ def main() -> int:
                     except Exception as exc:
                         logger.warning("[B] Pending setup monitor skipped | %s | %s", setup.symbol, exc)
 
+            if strategy_c_enabled:
+                strategy_c_positions = strategy_c_paper_store.open_positions()
+                if strategy_c_positions:
+                    by_segment = {}
+                    for pp in strategy_c_positions:
+                        by_segment.setdefault(pp.exchange_segment, []).append(pp)
+                    for segment, rows in by_segment.items():
+                        ids = [p.security_id for p in rows if p.security_id]
+                        payload = {}
+                        try:
+                            payload = broker.get_quote_data_by_security_ids(ids, exchange_segment=segment) if ids else {}
+                        except Exception as exc:
+                            logger.warning("[C] Paper MTM quote failed | segment=%s | error=%s", segment, exc)
+                        for pp in rows:
+                            quote = parse_quote_response(payload, pp.security_id)
+                            mark = quote.bid if quote.bid is not None and quote.bid > 0 else quote.ltp
+                            if mark is None or mark <= 0:
+                                logger.warning("[C] Paper position mark unavailable | %s | sec=%s", pp.underlying, pp.security_id)
+                                continue
+                            updated, events = manage_paper_position(
+                                pp, float(mark), hhmm, config.market.force_exit_time,
+                                getattr(config.execution, "paper_partial_exit_fraction", 0.50),
+                                getattr(config.execution, "paper_trailing_pct", 0.05),
+                            )
+                            strategy_c_paper_store.replace(updated)
+                            for ev in events:
+                                logger.info(
+                                    "[C] PAPER %s | %s | %s | qty %d @ %.2f | pnl ₹%.2f | reason=%s | remaining=%d | stop=%.2f",
+                                    ev.event, updated.underlying, updated.contract_symbol, ev.quantity, ev.price, ev.pnl, ev.reason, updated.open_quantity, updated.stop_price,
+                                )
+                                strategy_c_paper_journal.append({
+                                    "event": ev.event, "trade_id": ev.trade_id, "underlying": ev.underlying,
+                                    "direction": updated.direction, "model": updated.model, "contract_symbol": ev.contract_symbol,
+                                    "security_id": updated.security_id, "quantity": ev.quantity, "price": ev.price, "pnl": ev.pnl,
+                                    "reason": ev.reason, "open_quantity": updated.open_quantity, "entry_price": updated.entry_price,
+                                    "stop_price": updated.stop_price, "target_price": updated.target_price, "strategy_pnl": strategy_c_paper_store.strategy_pnl(),
+                                })
+                                if ev.event == "EXIT" and updated.status == "CLOSED":
+                                    if updated.total_pnl < 0:
+                                        strategy_c_state.consecutive_losses += 1
+                                    else:
+                                        strategy_c_state.consecutive_losses = 0
+                                    strategy_c_state_store.save(strategy_c_state)
+
+                expired_c_setups = expire_pending_setups(strategy_c_pending_store)
+                for expired_setup in expired_c_setups:
+                    logger.info(
+                        "[C] MTF SETUP EXPIRED | %s | reason=SETUP_MAX_MINUTES | setup_time=%s | expires_at=%s",
+                        expired_setup.symbol, expired_setup.created_at, expired_setup.expires_at,
+                    )
+                    strategy_c_setup_journal.append({
+                        "event": "EXPIRED", "setup_id": expired_setup.setup_id, "symbol": expired_setup.symbol,
+                        "direction": expired_setup.direction, "model": expired_setup.model,
+                        "context_15m": expired_setup.context_15m, "setup_5m": expired_setup.setup_5m,
+                        "setup_score": expired_setup.setup_score, "price": expired_setup.signal_price,
+                        "reason": "SETUP_MAX_MINUTES",
+                    })
+
+                strategy_c_pnl = strategy_c_paper_store.strategy_pnl_for_date(strategy_c_state.trading_date)
+                if (
+                    not getattr(strategy_c_state, "daily_loss_locked", False)
+                    and strategy_c_pnl <= -risk.daily_loss_limit(strategy_c_state)
+                ):
+                    strategy_c_state.daily_loss_locked = True
+                    strategy_c_state_store.save(strategy_c_state)
+                    logger.error(
+                        "[C] Daily loss circuit breaker latched | Today's Paper P&L ₹%.2f <= -₹%.2f | new entries locked for trading date %s",
+                        strategy_c_pnl, risk.daily_loss_limit(strategy_c_state), strategy_c_state.trading_date,
+                    )
+
+                for setup in strategy_c_pending_store.pending():
+                    try:
+                        raw1 = broker.get_historical_data(setup.symbol, config.market.exchange_cash, "1")
+                        raw5 = broker.get_historical_data(setup.symbol, config.market.exchange_cash, "5")
+                        raw15 = broker.get_historical_data(setup.symbol, config.market.exchange_cash, "15")
+                        df1 = normalize_ohlcv(raw1, setup.symbol, "1m")
+                        df5_setup = add_5m_indicators(normalize_ohlcv(raw5, setup.symbol, "5m"), strategy_settings)
+                        df15_setup = add_15m_indicators(normalize_ohlcv(raw15, setup.symbol, "15m"), strategy_settings)
+                        c1 = latest_completed_candle(df1, 1)
+                        df1 = df1.iloc[: c1.index + 1].copy()
+                        trigger = evaluate_strategy_c_trigger(
+                            setup,
+                            df1,
+                            getattr(config.execution, "strategy_b_max_adverse_atr_1m", 0.5),
+                            df5_setup,
+                            df15_setup,
+                            strategy_settings,
+                        )
+                        permission = type("Permission", (), {"allowed": True, "reason": "REGIME_PERMISSION_PASS"})()
+                        if trigger.triggered:
+                            try:
+                                market_daily = normalize_ohlcv(
+                                    broker.get_historical_data(config.execution.strategy_c_market_reference, config.market.exchange_cash, "D"),
+                                    config.execution.strategy_c_market_reference,
+                                    "1d",
+                                )
+                                stock_daily = normalize_ohlcv(
+                                    broker.get_historical_data(setup.symbol, config.market.exchange_cash, "D"),
+                                    setup.symbol,
+                                    "1d",
+                                )
+                                regime = evaluate_regime(
+                                    symbol=setup.symbol,
+                                    market_daily=market_daily,
+                                    stock_daily=stock_daily,
+                                    stock_1m=df1,
+                                    stock_5m=df5_setup,
+                                    stock_15m=df15_setup,
+                                    trading_date=strategy_c_state.trading_date,
+                                    settings=strategy_settings,
+                                )
+                                permission = regime_permission(regime, setup.direction, strategy_settings, hhmm)
+                                strategy_c_regimes_seen.append(regime)
+                                logger.info("%s", format_regime_log(setup.symbol, regime))
+                            except Exception as exc:
+                                logger.warning("[C] Regime refresh unavailable | %s | %s", setup.symbol, exc)
+                        logger.info("%s", format_strategy_c_check(setup.symbol, setup, trigger, permission))
+                        if trigger.cancel or not permission.allowed:
+                            reason = trigger.reason if trigger.cancel else permission.reason
+                            mark_setup_cancelled(strategy_c_pending_store, setup, reason)
+                            logger.info("[C] BLOCK | %s | reason=%s", setup.symbol, reason)
+                            strategy_c_setup_journal.append({
+                                "event": "CANCELLED", "setup_id": setup.setup_id, "symbol": setup.symbol,
+                                "direction": setup.direction, "model": setup.model, "context_15m": setup.context_15m,
+                                "setup_5m": setup.setup_5m, "setup_score": setup.setup_score,
+                                "price": trigger.close_price, "reason": reason,
+                            })
+                            continue
+                        if not trigger.triggered:
+                            continue
+
+                        strategy_c_open = strategy_c_paper_store.open_positions()
+                        strategy_c_pnl = strategy_c_paper_store.strategy_pnl_for_date(strategy_c_state.trading_date)
+                        if (
+                            not getattr(strategy_c_state, "daily_loss_locked", False)
+                            and strategy_c_pnl <= -risk.daily_loss_limit(strategy_c_state)
+                        ):
+                            strategy_c_state.daily_loss_locked = True
+                            strategy_c_state_store.save(strategy_c_state)
+                        strategy_c_decision = risk.can_open_new_trade(
+                            state=strategy_c_state,
+                            managed_open_positions=len(strategy_c_open),
+                            strategy_pnl=strategy_c_pnl,
+                        )
+                        if not strategy_c_decision.allowed:
+                            logger.info("[C] MTF trigger blocked | %s | risk=%s", setup.symbol, strategy_c_decision.reason)
+                            continue
+                        if strategy_c_paper_store.has_open_underlying(setup.symbol):
+                            logger.info("[C] MTF trigger blocked | %s | PAPER_POSITION_ALREADY_OPEN", setup.symbol)
+                            continue
+
+                        contract = contract_from_setup(setup)
+                        candidate = SimpleNamespace(
+                            contract=contract,
+                            lot_size=setup.lot_size,
+                            entry_limit=setup.entry_limit,
+                            quantity=setup.quantity,
+                            stop_price=setup.stop_price,
+                            target_price=setup.target_price,
+                        )
+                        paper = strategy_c_paper_store.add_from_candidate(setup.symbol, setup.direction, setup.model, candidate)
+                        mark_setup_executed(strategy_c_pending_store, setup, trigger.close_price)
+                        strategy_c_state.daily_trade_count += 1
+                        if setup.symbol not in strategy_c_state.traded_underlyings:
+                            strategy_c_state.traded_underlyings.append(setup.symbol)
+                        strategy_c_state_store.save(strategy_c_state)
+                        strategy_c_paper_journal.append({
+                            "event": "ENTRY", "trade_id": paper.trade_id, "underlying": setup.symbol, "direction": setup.direction,
+                            "model": setup.model, "contract_symbol": paper.contract_symbol, "security_id": paper.security_id,
+                            "quantity": paper.initial_quantity, "price": paper.entry_price, "pnl": 0.0, "reason": "1M_REGIME_MTF_TRIGGER",
+                            "open_quantity": paper.open_quantity, "entry_price": paper.entry_price, "stop_price": paper.stop_price,
+                            "target_price": paper.target_price, "strategy_pnl": strategy_c_paper_store.strategy_pnl(),
+                        })
+                        logger.info(
+                            "[C] PAPER ENTRY | %s | %s | qty %d | entry %.2f | target1 %.2f | stop %.2f | trade_id=%s",
+                            setup.symbol, paper.contract_symbol, paper.initial_quantity, paper.entry_price,
+                            paper.target_price, paper.stop_price, paper.trade_id,
+                        )
+                    except Exception as exc:
+                        logger.warning("[C] Pending setup monitor skipped | %s | %s", setup.symbol, exc)
+
             paper_open = paper_store.open_positions()
             strategy_pnl = paper_store.strategy_pnl_for_date(state.trading_date)
             cumulative_strategy_pnl = paper_store.strategy_pnl()
@@ -638,8 +880,8 @@ def main() -> int:
                 "%sScan %s | Account P&L %s | Today's Paper P&L ₹%.2f | Cumulative Paper P&L ₹%.2f | Paper %d/%d | External %d | Trades %d/%d | Risk=%s",
                 strategy_a_log_prefix, hhmm,
                 "N/A" if pnl is None else f"₹{pnl:.2f}",
-                strategy_pnl, cumulative_strategy_pnl, len(paper_open), config.risk.max_open_positions,
-                ownership.external_open_count, state.daily_trade_count, config.risk.max_daily_trades, decision.reason,
+                strategy_pnl, cumulative_strategy_pnl, len(paper_open), effective_open_positions,
+                ownership.external_open_count, state.daily_trade_count, effective_daily_trades, decision.reason,
             )
             if decision.daily_loss_override:
                 logger.warning(
@@ -717,6 +959,107 @@ def main() -> int:
                                             "setup_score": setup.setup_score, "price": setup.signal_price,
                                             "reason": ",".join(setup.setup_reasons),
                                         })
+
+                    if strategy_c_enabled:
+                        try:
+                            c_setup = evaluate_strategy_c_setup(symbol, df5, df15, hhmm, strategy_settings)
+                            if c_setup.decision != "NONE":
+                                raw1_c = broker.get_historical_data(symbol, config.market.exchange_cash, "1")
+                                raw_daily_market = broker.get_historical_data(config.execution.strategy_c_market_reference, config.market.exchange_cash, "D")
+                                raw_daily_stock = broker.get_historical_data(symbol, config.market.exchange_cash, "D")
+                                df1_c = normalize_ohlcv(raw1_c, symbol, "1m")
+                                c1_c = latest_completed_candle(df1_c, 1)
+                                df1_c = df1_c.iloc[: c1_c.index + 1].copy()
+                                market_daily = normalize_ohlcv(raw_daily_market, config.execution.strategy_c_market_reference, "1d")
+                                stock_daily = normalize_ohlcv(raw_daily_stock, symbol, "1d")
+                                regime = evaluate_regime(
+                                    symbol=symbol,
+                                    market_daily=market_daily,
+                                    stock_daily=stock_daily,
+                                    stock_1m=df1_c,
+                                    stock_5m=df5,
+                                    stock_15m=df15,
+                                    trading_date=strategy_c_state.trading_date,
+                                    settings=strategy_settings,
+                                )
+                                permission = regime_permission(regime, c_setup.direction, strategy_settings, hhmm)
+                                strategy_c_regimes_seen.append(regime)
+                                logger.info("%s", format_regime_log(symbol, regime))
+                                strategy_c_regime_journal.append({
+                                    "symbol": symbol, "trading_date": regime.trading_date,
+                                    "market_gap_pct": regime.market_gap_pct, "market_gap_class": regime.market_gap_class,
+                                    "market_direction": regime.market_direction, "stock_gap_pct": regime.stock_gap_pct,
+                                    "stock_gap_class": regime.stock_gap_class, "relative_gap_pct": regime.relative_gap_pct,
+                                    "relative_strength_class": regime.relative_strength_class,
+                                    "opening_behavior": regime.opening_behavior, "confidence": regime.confidence,
+                                    "regime": regime.regime, "context_15m_source": regime.context_15m_source,
+                                    "reasons": "|".join(regime.reasons),
+                                })
+                                if hhmm >= config.market.new_entry_cutoff:
+                                    logger.info("[C] MTF setup skipped | %s | ENTRY_CUTOFF %s reached", symbol, config.market.new_entry_cutoff)
+                                elif strategy_c_pending_store.has_pending_symbol(symbol):
+                                    logger.info("[C] MTF setup skipped | %s | PENDING_SETUP_ALREADY_OPEN", symbol)
+                                elif strategy_c_paper_store.has_open_underlying(symbol):
+                                    logger.info("[C] MTF setup skipped | %s | PAPER_POSITION_ALREADY_OPEN", symbol)
+                                elif not permission.allowed:
+                                    logger.info("[C] BLOCK | %s | reason=%s", symbol, permission.reason)
+                                    strategy_c_setup_journal.append({
+                                        "event": "BLOCKED", "setup_id": "", "symbol": symbol, "direction": c_setup.direction,
+                                        "model": c_setup.model, "context_15m": c_setup.context_15m,
+                                        "setup_5m": c_setup.decision, "setup_score": c_setup.score_pct,
+                                        "price": c_setup.metrics.get("close_5m", ""), "reason": permission.reason,
+                                    })
+                                else:
+                                    strategy_c_open = strategy_c_paper_store.open_positions()
+                                    strategy_c_pnl = strategy_c_paper_store.strategy_pnl_for_date(strategy_c_state.trading_date)
+                                    strategy_c_decision = risk.can_open_new_trade(
+                                        state=strategy_c_state,
+                                        managed_open_positions=len(strategy_c_open),
+                                        strategy_pnl=strategy_c_pnl,
+                                    )
+                                    if not strategy_c_decision.allowed:
+                                        logger.info("[C] MTF setup skipped | %s | risk=%s", symbol, strategy_c_decision.reason)
+                                    else:
+                                        best_c = _select_best_contract(
+                                            logger=logger,
+                                            broker=broker,
+                                            resolver=resolver,
+                                            config=config,
+                                            scorer=scorer,
+                                            selector=selector,
+                                            exec_diag=exec_diag,
+                                            risk=risk,
+                                            state=strategy_c_state,
+                                            symbol=symbol,
+                                            direction=c_setup.direction,
+                                            model=c_setup.model,
+                                            score_pct=c_setup.score_pct,
+                                            underlying_price=float(c_setup.metrics["close_5m"]),
+                                            log_prefix="[C] ",
+                                            native_quote_debug_state=native_quote_debug_state,
+                                        )
+                                        if best_c is None:
+                                            logger.info("[C] MTF setup skipped | %s | NO_EXECUTABLE_CONTRACT", symbol)
+                                        else:
+                                            setup = strategy_c_pending_store.add_from_candidate(
+                                                c_setup, best_c, getattr(config.execution, "strategy_b_setup_max_minutes", 10)
+                                            )
+                                            setup.model = "REGIME_MTF_15M_5M_1M"
+                                            strategy_c_pending_store.replace(setup)
+                                            logger.info(
+                                                "[C] MTF SETUP CREATED | %s | %s | regime=%s | score=%.0f | qty=%d | setup_price=%.2f | expires=%s",
+                                                setup.symbol, setup.direction, regime.regime, setup.setup_score,
+                                                setup.quantity, setup.signal_price, setup.expires_at,
+                                            )
+                                            strategy_c_setup_journal.append({
+                                                "event": "CREATED", "setup_id": setup.setup_id, "symbol": setup.symbol,
+                                                "direction": setup.direction, "model": setup.model,
+                                                "context_15m": setup.context_15m, "setup_5m": setup.setup_5m,
+                                                "setup_score": setup.setup_score, "price": setup.signal_price,
+                                                "reason": regime.regime,
+                                            })
+                        except Exception as exc:
+                            logger.warning("[C] Regime/setup skipped | %s | %s", symbol, exc)
 
                     if result.decision == "NEAR":
                         near_signals += 1
@@ -801,6 +1144,8 @@ def main() -> int:
             logger.info("Scan complete | full signals=%d | near signals=%d | execution candidates=%d", full_signals, near_signals, exec_candidates)
             wait = scheduler.seconds_until_next_5m_scan()
             if strategy_b_enabled and strategy_b_pending_store.pending():
+                wait = min(wait, int(getattr(config.execution, "strategy_b_monitor_interval_seconds", 60)))
+            if strategy_c_enabled and strategy_c_pending_store.pending():
                 wait = min(wait, int(getattr(config.execution, "strategy_b_monitor_interval_seconds", 60)))
             logger.info("Next completed-candle scan in %ds", wait)
             time.sleep(wait)

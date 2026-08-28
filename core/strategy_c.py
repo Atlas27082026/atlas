@@ -271,9 +271,11 @@ def format_regime_log(symbol: str, regime: MarketRegime) -> str:
 
 def format_strategy_c_check(symbol: str, setup: MTFSetupResult, trigger: MTFTriggerResult, permission: StrategyCPermission) -> str:
     trigger_state = "PASS" if trigger.triggered else "FAIL"
+    context = getattr(setup, "context_15m", "")
+    setup_decision = getattr(setup, "decision", "") or getattr(setup, "setup_5m", "") or getattr(setup, "setup_kind", "")
     return (
-        f"[C] MTF CHECK | {symbol} | 15m={setup.context_15m} | "
-        f"5m_setup={setup.decision} | 1m_trigger={trigger_state} | "
+        f"[C] MTF CHECK | {symbol} | 15m={context} | "
+        f"5m_setup={setup_decision} | 1m_trigger={trigger_state} | "
         f"regime_permission={'PASS' if permission.allowed else 'FAIL'} | "
         f"action={'ENTER' if trigger.triggered and permission.allowed else 'WAIT'} | reason={permission.reason if not permission.allowed else trigger.reason}"
     )
