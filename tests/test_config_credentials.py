@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import config
-from config import CredentialsConfig
+from config import CredentialsConfig, ExecutionConfig
 
 
 class ConfigCredentialTests(unittest.TestCase):
@@ -30,6 +30,13 @@ class ConfigCredentialTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "CLIENT_CODE"):
                 CredentialsConfig()
+
+    def test_run4_execution_defaults_are_observational_and_quiet(self):
+        cfg = ExecutionConfig()
+
+        self.assertFalse(cfg.enable_strategy_b)
+        self.assertFalse(cfg.native_quote_diagnostics)
+        self.assertEqual(cfg.strategy_b_setup_max_minutes, 10)
 
 
 if __name__ == "__main__":

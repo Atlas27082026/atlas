@@ -346,7 +346,7 @@ def main() -> int:
     native_quote_debug_state = {"done": False}
 
     if not config.risk.dry_run:
-        logger.error("Sprint 4.0 is PAPER ONLY and intentionally refuses LIVE mode. Keep dry_run=True.")
+        logger.error("Atlas %s %s is PAPER ONLY and intentionally refuses LIVE mode. Keep dry_run=True.", run_identity.version, run_identity.run)
         return 2
 
     processed_candles = {}

@@ -518,6 +518,18 @@ class StrategyBTests(unittest.TestCase):
             self.assertEqual(b_stats.executed, 1)
             self.assertGreaterEqual(b_stats.average_entry_improvement, 0.0)
 
+    def test_strategy_a_and_b_can_hold_same_underlying_independently(self):
+        with tempfile.TemporaryDirectory() as td:
+            a_store = PaperPositionStore(Path(td) / "a.json")
+            b_store = PaperPositionStore(Path(td) / "b.json")
+
+            a_position = a_store.add_from_candidate("TEST", "BULL", "A_MODEL", _candidate())
+            b_position = b_store.add_from_candidate("TEST", "BULL", "MTF_SETUP", _candidate())
+
+            self.assertTrue(a_store.has_open_underlying("TEST"))
+            self.assertTrue(b_store.has_open_underlying("TEST"))
+            self.assertNotEqual(a_position.trade_id, b_position.trade_id)
+
     def test_comparison_report_contains_both_strategies(self):
         with tempfile.TemporaryDirectory() as td:
             a_store = PaperPositionStore(Path(td) / "a.json")
