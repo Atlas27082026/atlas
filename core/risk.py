@@ -9,6 +9,7 @@ from core.state import DailyState
 class RiskDecision:
     allowed: bool
     reason: str
+    daily_loss_override: bool = False
 
 
 class RiskManager:
@@ -36,9 +37,9 @@ class RiskManager:
         by this risk manager without an explicit ownership record.
         """
         risk = self.config.risk
-
-        if getattr(state, "daily_loss_locked", False):
-            return RiskDecision(False, "STRATEGY_DAILY_LOSS_LOCKED")
+        paper_daily_loss_override = bool(
+            risk.dry_run and getattr(risk, "paper_ignore_daily_loss_lock", False)
+        )
 
         if state.daily_trade_count >= risk.max_daily_trades:
             return RiskDecision(False, "MAX_DAILY_TRADES")
@@ -52,6 +53,11 @@ class RiskManager:
         if underlying and underlying in state.traded_underlyings:
             return RiskDecision(False, "UNDERLYING_ALREADY_TRADED")
 
+        if getattr(state, "daily_loss_locked", False):
+            if paper_daily_loss_override:
+                return RiskDecision(True, "STRATEGY_DAILY_LOSS_LOCKED", True)
+            return RiskDecision(False, "STRATEGY_DAILY_LOSS_LOCKED")
+
         # Sprint 4 paper P&L is strategy-owned risk and therefore must obey the
         # same daily-loss gate as live managed positions. Manual broker P&L is
         # never passed here. Live mode additionally fails closed if owned P&L is
@@ -60,6 +66,8 @@ class RiskManager:
             if not risk.dry_run and risk.fail_closed_on_risk_data_error:
                 return RiskDecision(False, "STRATEGY_PNL_UNAVAILABLE")
         elif strategy_pnl <= -self.daily_loss_limit(state):
+            if paper_daily_loss_override:
+                return RiskDecision(True, "STRATEGY_DAILY_LOSS_LOCKED", True)
             return RiskDecision(False, "STRATEGY_DAILY_LOSS_LOCKED")
 
         return RiskDecision(True, "OK")

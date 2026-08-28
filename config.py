@@ -45,6 +45,7 @@ class MarketConfig:
 @dataclass(frozen=True)
 class RiskConfig:
     dry_run: bool = True
+    paper_ignore_daily_loss_lock: bool = False
     max_open_positions: int = 2
     max_daily_trades: int = 5
     capital_per_trade_fraction: float = 0.20

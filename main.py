@@ -281,6 +281,11 @@ def main() -> int:
                 strategy_pnl, cumulative_strategy_pnl, len(paper_open), config.risk.max_open_positions,
                 ownership.external_open_count, state.daily_trade_count, config.risk.max_daily_trades, decision.reason,
             )
+            if decision.daily_loss_override:
+                logger.warning(
+                    "PAPER_RESEARCH_OVERRIDE | Daily loss lock bypassed | Today's P&L ₹%.2f",
+                    strategy_pnl,
+                )
 
             full_signals = near_signals = exec_candidates = 0
             for symbol in config.watchlist:
