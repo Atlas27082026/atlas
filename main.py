@@ -19,8 +19,12 @@ from core.strategy_b import (
     contract_from_setup,
     evaluate_confirmation,
     expire_pending_setups,
+    format_confirmation_check,
+    format_confirmation_passed,
+    format_pending_expired,
     mark_setup_cancelled,
     mark_setup_executed,
+    strategy_b_summary_report,
 )
 from data.tradehull_client import TradeHullBroker
 from execution.contract_resolver import InstrumentMasterResolver
@@ -223,17 +227,19 @@ def main() -> int:
             hhmm = now.strftime("%H:%M")
             if hhmm > config.market.market_close:
                 if strategy_b_enabled:
+                    strategy_b_stats = compute_strategy_stats(
+                        strategy_b_paper_store,
+                        strategy_b_pending_store,
+                        strategy_b_state.trading_date,
+                    )
                     logger.info(
                         "\n%s",
                         comparison_report(
                             compute_strategy_stats(paper_store, trading_date=state.trading_date),
-                            compute_strategy_stats(
-                                strategy_b_paper_store,
-                                strategy_b_pending_store,
-                                strategy_b_state.trading_date,
-                            ),
+                            strategy_b_stats,
                         ),
                     )
+                    logger.info("\n%s", strategy_b_summary_report(strategy_b_stats))
                 logger.info("Market closed at %s. Sprint 3 engine stopping.", hhmm)
                 return 0
             if hhmm < config.market.market_open:
@@ -344,9 +350,20 @@ def main() -> int:
                                         strategy_b_state.consecutive_losses = 0
                                     strategy_b_state_store.save(strategy_b_state)
 
-                expired = expire_pending_setups(strategy_b_pending_store)
-                if expired:
-                    logger.info("[B] Pending setups expired | count=%d", expired)
+                expired_setups = expire_pending_setups(strategy_b_pending_store)
+                for expired_setup in expired_setups:
+                    expiry_diagnostics = None
+                    try:
+                        raw1 = broker.get_historical_data(expired_setup.symbol, config.market.exchange_cash, "1")
+                        df1 = normalize_ohlcv(raw1, expired_setup.symbol, "1m")
+                        c1 = latest_completed_candle(df1, 1)
+                        df1 = df1.iloc[: c1.index + 1].copy()
+                        expiry_diagnostics = evaluate_confirmation(
+                            expired_setup, df1, getattr(config.execution, "strategy_b_max_adverse_atr_1m", 0.5)
+                        ).diagnostics
+                    except Exception as exc:
+                        logger.warning("[B] Pending expiry diagnostics unavailable | %s | %s", expired_setup.symbol, exc)
+                    logger.info("%s", format_pending_expired(expired_setup, expiry_diagnostics))
 
                 strategy_b_pnl = strategy_b_paper_store.strategy_pnl_for_date(strategy_b_state.trading_date)
                 if (
@@ -369,6 +386,7 @@ def main() -> int:
                         confirmation = evaluate_confirmation(
                             setup, df1, getattr(config.execution, "strategy_b_max_adverse_atr_1m", 0.5)
                         )
+                        logger.info("%s", format_confirmation_check(setup, confirmation))
                         if confirmation.cancel:
                             mark_setup_cancelled(strategy_b_pending_store, setup, confirmation.reason)
                             logger.info("[B] Pending setup cancelled | %s | reason=%s", setup.symbol, confirmation.reason)
@@ -406,6 +424,7 @@ def main() -> int:
                             stop_price=setup.stop_price,
                             target_price=setup.target_price,
                         )
+                        logger.info("%s", format_confirmation_passed(setup, confirmation))
                         paper = strategy_b_paper_store.add_from_candidate(setup.symbol, setup.direction, setup.model, candidate)
                         mark_setup_executed(strategy_b_pending_store, setup, confirmation.close_price)
                         strategy_b_state.daily_trade_count += 1

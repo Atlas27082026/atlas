@@ -5,7 +5,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
@@ -41,12 +41,32 @@ class PendingSetup:
 
 
 @dataclass(frozen=True)
+class ConfirmationDiagnostics:
+    elapsed_seconds: int
+    expires_in_seconds: int
+    signal_price: float
+    current_price: float
+    distance_pct: float
+    highest_since_signal: float
+    lowest_since_signal: float
+    signal_time: str
+    entry_time: str
+    delay_seconds: int
+    trigger_cross: bool
+    vwap: bool
+    momentum: bool
+    volume: bool
+    trend: bool
+
+
+@dataclass(frozen=True)
 class ConfirmationResult:
     confirmed: bool
     cancel: bool
     reason: str
     close_price: float = 0.0
     atr_1m: float = 0.0
+    diagnostics: Optional[ConfirmationDiagnostics] = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +84,7 @@ class StrategyStats:
     cancelled: int = 0
     average_entry_delay: float = 0.0
     average_entry_improvement: float = 0.0
+    average_wait_before_expiry: float = 0.0
 
 
 class PendingSetupStore:
@@ -160,6 +181,111 @@ def _atr_1m(df: pd.DataFrame, idx: int, lookback: int = 14) -> float:
     return float(sum(ranges) / len(ranges)) if ranges else 0.0
 
 
+def _parse_dt(value: str) -> Optional[datetime]:
+    try:
+        return datetime.fromisoformat(str(value).replace(" ", "T"))
+    except Exception:
+        return None
+
+
+def _clock(value: str) -> str:
+    parsed = _parse_dt(value)
+    return parsed.strftime("%H:%M:%S") if parsed else str(value)
+
+
+def _pass_fail(value: bool) -> str:
+    return "PASS" if value else "FAIL"
+
+
+def _never_pass(value: bool) -> str:
+    return "PASS" if value else "NEVER"
+
+
+def _expiry_reason(diagnostics: Optional[ConfirmationDiagnostics]) -> str:
+    if diagnostics is None:
+        return "Confirmation never occurred"
+    if not diagnostics.trigger_cross:
+        return "Trigger never crossed"
+    if not diagnostics.vwap:
+        return "VWAP confirmation never occurred"
+    if not diagnostics.momentum:
+        return "Momentum confirmation never occurred"
+    if not diagnostics.volume:
+        return "Volume confirmation never occurred"
+    if not diagnostics.trend:
+        return "Trend confirmation never occurred"
+    return "Confirmation never occurred"
+
+
+def format_confirmation_check(setup: PendingSetup, result: ConfirmationResult) -> str:
+    d = result.diagnostics
+    if d is None:
+        return f"[B] Confirmation Check | {setup.symbol}\n\nStatus         : {result.reason}"
+    status = "PASSED" if result.confirmed else "CANCELLED" if result.cancel else "WAITING"
+    return (
+        f"[B] Confirmation Check | {setup.symbol}\n\n"
+        f"Elapsed        : {d.elapsed_seconds} sec\n"
+        f"Expires In     : {d.expires_in_seconds} sec\n\n"
+        f"Signal Price   : {d.signal_price:.2f}\n"
+        f"Current Price  : {d.current_price:.2f}\n"
+        f"Distance       : {d.distance_pct:.2f}%\n\n"
+        f"Highest Since Signal : {d.highest_since_signal:.2f}\n"
+        f"Lowest Since Signal  : {d.lowest_since_signal:.2f}\n\n"
+        f"Trigger Cross  : {_pass_fail(d.trigger_cross)}\n"
+        f"VWAP           : {_pass_fail(d.vwap)}\n"
+        f"Momentum       : {_pass_fail(d.momentum)}\n"
+        f"Volume         : {_pass_fail(d.volume)}\n"
+        f"Trend          : {_pass_fail(d.trend)}\n\n"
+        f"Status         : {status}"
+    )
+
+
+def format_confirmation_passed(setup: PendingSetup, result: ConfirmationResult) -> str:
+    d = result.diagnostics
+    if d is None:
+        return f"[B] Confirmation PASSED | {setup.symbol}"
+    return (
+        f"[B] Confirmation PASSED | {setup.symbol}\n\n"
+        f"Trigger Cross : {_pass_fail(d.trigger_cross)}\n"
+        f"VWAP          : {_pass_fail(d.vwap)}\n"
+        f"Momentum      : {_pass_fail(d.momentum)}\n"
+        f"Volume        : {_pass_fail(d.volume)}\n"
+        f"Trend         : {_pass_fail(d.trend)}\n\n"
+        f"Signal Time   : {d.signal_time}\n"
+        f"Entry Time    : {d.entry_time}\n"
+        f"Delay         : {d.delay_seconds} sec"
+    )
+
+
+def format_pending_expired(setup: PendingSetup, diagnostics: Optional[ConfirmationDiagnostics]) -> str:
+    signal_time = _clock(setup.signal_timestamp)
+    created = _parse_dt(setup.created_at)
+    resolved = _parse_dt(setup.resolved_at)
+    lifetime = int((resolved - created).total_seconds()) if created and resolved else 0
+    if diagnostics is None:
+        return (
+            f"[B] Pending Expired | {setup.symbol}\n\n"
+            f"Signal Time : {signal_time}\n"
+            f"Lifetime    : {lifetime} sec\n\n"
+            f"Signal Price : {float(setup.signal_price):.2f}\n\n"
+            "Reason : Confirmation data unavailable"
+        )
+    return (
+        f"[B] Pending Expired | {setup.symbol}\n\n"
+        f"Signal Time : {signal_time}\n"
+        f"Lifetime    : {lifetime} sec\n\n"
+        f"Signal Price : {diagnostics.signal_price:.2f}\n\n"
+        f"Highest Since Signal : {diagnostics.highest_since_signal:.2f}\n"
+        f"Lowest Since Signal  : {diagnostics.lowest_since_signal:.2f}\n\n"
+        f"Trigger Cross : {_never_pass(diagnostics.trigger_cross)}\n"
+        f"VWAP          : {_pass_fail(diagnostics.vwap)}\n"
+        f"Momentum      : {_pass_fail(diagnostics.momentum)}\n"
+        f"Volume        : {_pass_fail(diagnostics.volume)}\n"
+        f"Trend         : {_pass_fail(diagnostics.trend)}\n\n"
+        f"Reason : {_expiry_reason(diagnostics)}"
+    )
+
+
 def evaluate_confirmation(setup: PendingSetup, df_1m: pd.DataFrame, max_adverse_atr: float) -> ConfirmationResult:
     if len(df_1m) < 2:
         return ConfirmationResult(False, False, "ONE_MINUTE_NOT_READY")
@@ -173,45 +299,78 @@ def evaluate_confirmation(setup: PendingSetup, df_1m: pd.DataFrame, max_adverse_
     open_ = float(row["open"])
     atr = _atr_1m(out, idx)
     adverse_limit = float(max_adverse_atr) * atr
+    since_signal = out[out["datetime_parsed"] >= pd.Timestamp(setup.signal_timestamp)]
+    if since_signal.empty:
+        since_signal = out
+    current_time = pd.Timestamp(row["datetime_parsed"]).to_pydatetime()
+    created = _parse_dt(setup.created_at) or current_time
+    expires = _parse_dt(setup.expires_at) or current_time
+    signal_time = _clock(setup.signal_timestamp)
+    entry_time = current_time.strftime("%H:%M:%S")
+    volume_ok = float(row["volume"]) >= float(prev["volume"])
 
     if setup.direction == "BULL":
         trend_valid = close > float(setup.signal_5m_vwap)
+        trigger_cross = close > float(prev["high"])
+        vwap_ok = close > float(row["vwap_1m"])
+        momentum_ok = close > open_
         adverse = atr > 0 and close > float(setup.signal_price) + adverse_limit
         confirmed = (
-            close > open_
-            and close > float(prev["high"])
-            and close > float(row["vwap_1m"])
+            momentum_ok
+            and trigger_cross
+            and vwap_ok
             and trend_valid
         )
     else:
         trend_valid = close < float(setup.signal_5m_vwap)
+        trigger_cross = close < float(prev["low"])
+        vwap_ok = close < float(row["vwap_1m"])
+        momentum_ok = close < open_
         adverse = atr > 0 and close < float(setup.signal_price) - adverse_limit
         confirmed = (
-            close < open_
-            and close < float(prev["low"])
-            and close < float(row["vwap_1m"])
+            momentum_ok
+            and trigger_cross
+            and vwap_ok
             and trend_valid
         )
 
+    diagnostics = ConfirmationDiagnostics(
+        elapsed_seconds=max(0, int((current_time - created).total_seconds())),
+        expires_in_seconds=max(0, int((expires - current_time).total_seconds())),
+        signal_price=float(setup.signal_price),
+        current_price=close,
+        distance_pct=0.0 if float(setup.signal_price) == 0 else ((close - float(setup.signal_price)) / float(setup.signal_price)) * 100.0,
+        highest_since_signal=float(since_signal["high"].max()),
+        lowest_since_signal=float(since_signal["low"].min()),
+        signal_time=signal_time,
+        entry_time=entry_time,
+        delay_seconds=max(0, int((current_time - created).total_seconds())),
+        trigger_cross=trigger_cross,
+        vwap=vwap_ok,
+        momentum=momentum_ok,
+        volume=volume_ok,
+        trend=trend_valid,
+    )
+
     if not trend_valid:
-        return ConfirmationResult(False, True, "TREND_INVALIDATED", close, atr)
+        return ConfirmationResult(False, True, "TREND_INVALIDATED", close, atr, diagnostics)
     if adverse:
-        return ConfirmationResult(False, True, "ENTRY_WORSE_THAN_0_5_ATR_1M", close, atr)
+        return ConfirmationResult(False, True, "ENTRY_WORSE_THAN_0_5_ATR_1M", close, atr, diagnostics)
     if confirmed:
-        return ConfirmationResult(True, False, "CONFIRMATION_SATISFIED", close, atr)
-    return ConfirmationResult(False, False, "WAITING_FOR_1M_CONFIRMATION", close, atr)
+        return ConfirmationResult(True, False, "CONFIRMATION_SATISFIED", close, atr, diagnostics)
+    return ConfirmationResult(False, False, "WAITING_FOR_1M_CONFIRMATION", close, atr, diagnostics)
 
 
-def expire_pending_setups(store: PendingSetupStore, now: Optional[datetime] = None) -> int:
+def expire_pending_setups(store: PendingSetupStore, now: Optional[datetime] = None) -> List[PendingSetup]:
     now = now or datetime.now()
-    expired = 0
+    expired: List[PendingSetup] = []
     for setup in store.pending():
         if datetime.fromisoformat(setup.expires_at) <= now:
             setup.status = "EXPIRED"
             setup.exit_reason = "EXPIRED"
             setup.resolved_at = now.isoformat(timespec="seconds")
             store.replace(setup)
-            expired += 1
+            expired.append(setup)
     return expired
 
 
@@ -254,6 +413,7 @@ def compute_strategy_stats(paper_store, pending_store: Optional[PendingSetupStor
     if trading_date:
         setups = [s for s in setups if str(s.created_at).startswith(str(trading_date))]
     executed = [s for s in setups if s.status == "EXECUTED"]
+    expired = [s for s in setups if s.status == "EXPIRED"]
     delays = []
     improvements = []
     for setup in executed:
@@ -263,6 +423,12 @@ def compute_strategy_stats(paper_store, pending_store: Optional[PendingSetupStor
                 improvements.append(float(setup.executed_price) - float(setup.signal_price))
             else:
                 improvements.append(float(setup.signal_price) - float(setup.executed_price))
+        except Exception:
+            pass
+    expiry_waits = []
+    for setup in expired:
+        try:
+            expiry_waits.append((datetime.fromisoformat(setup.resolved_at) - datetime.fromisoformat(setup.created_at)).total_seconds())
         except Exception:
             pass
 
@@ -276,10 +442,11 @@ def compute_strategy_stats(paper_store, pending_store: Optional[PendingSetupStor
         expectancy=round(expectancy, 2),
         pending_setups=len(setups),
         executed=len(executed),
-        expired=sum(1 for s in setups if s.status == "EXPIRED"),
+        expired=len(expired),
         cancelled=sum(1 for s in setups if s.status == "CANCELLED"),
         average_entry_delay=round(sum(delays) / len(delays), 2) if delays else 0.0,
         average_entry_improvement=round(sum(improvements) / len(improvements), 4) if improvements else 0.0,
+        average_wait_before_expiry=round(sum(expiry_waits) / len(expiry_waits), 2) if expiry_waits else 0.0,
     )
 
 
@@ -297,4 +464,20 @@ def comparison_report(strategy_a: StrategyStats, strategy_b: StrategyStats) -> s
         f"Profit Factor={strategy_b.profit_factor:.4f} | Expectancy={strategy_b.expectancy:.2f} | "
         f"Average Entry Delay={strategy_b.average_entry_delay:.2f}s | "
         f"Average Entry Improvement={strategy_b.average_entry_improvement:.4f}"
+    )
+
+
+def strategy_b_summary_report(stats: StrategyStats) -> str:
+    confirmation_rate = (stats.executed / stats.pending_setups) * 100.0 if stats.pending_setups else 0.0
+    return (
+        "===============================\n"
+        "Strategy B Summary\n"
+        "===============================\n\n"
+        f"Pending Created      : {stats.pending_setups}\n\n"
+        f"Confirmed            : {stats.executed}\n\n"
+        f"Expired              : {stats.expired}\n\n"
+        f"Cancelled            : {stats.cancelled}\n\n"
+        f"Confirmation Rate    : {confirmation_rate:.1f}%\n\n"
+        f"Average Delay        : {stats.average_entry_delay:.0f} sec\n\n"
+        f"Average Wait Before Expiry : {stats.average_wait_before_expiry:.0f} sec"
     )

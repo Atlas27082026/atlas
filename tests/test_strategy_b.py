@@ -13,8 +13,12 @@ from core.strategy_b import (
     compute_strategy_stats,
     evaluate_confirmation,
     expire_pending_setups,
+    format_confirmation_check,
+    format_confirmation_passed,
+    format_pending_expired,
     mark_setup_cancelled,
     mark_setup_executed,
+    strategy_b_summary_report,
 )
 from execution.models import ContractCandidate, LiquidityAssessment, QuoteSnapshot
 
@@ -101,7 +105,7 @@ class StrategyBTests(unittest.TestCase):
 
             expired = expire_pending_setups(store, now=pd.Timestamp("2026-08-28T10:06:00").to_pydatetime())
 
-            self.assertEqual(expired, 1)
+            self.assertEqual(len(expired), 1)
             self.assertEqual(store.load()[0].status, "EXPIRED")
 
     def test_successful_confirmation(self):
@@ -118,6 +122,8 @@ class StrategyBTests(unittest.TestCase):
         self.assertTrue(result.confirmed)
         self.assertFalse(result.cancel)
         self.assertEqual(result.reason, "CONFIRMATION_SATISFIED")
+        self.assertIsNotNone(result.diagnostics)
+        self.assertTrue(result.diagnostics.trigger_cross)
 
     def test_cancellation_when_trend_invalidated(self):
         setup = PendingSetupStore(Path(tempfile.mkdtemp()) / "pending.json").add_from_candidate(
@@ -133,6 +139,56 @@ class StrategyBTests(unittest.TestCase):
         self.assertFalse(result.confirmed)
         self.assertTrue(result.cancel)
         self.assertEqual(result.reason, "TREND_INVALIDATED")
+
+    def test_confirmation_check_log_contains_diagnostics(self):
+        setup = PendingSetupStore(Path(tempfile.mkdtemp()) / "pending.json").add_from_candidate(
+            _signal(), _candidate(), expiry_minutes=5
+        )
+        df = pd.DataFrame([
+            {"datetime_parsed": pd.Timestamp("2026-08-28 10:00"), "open": 99.0, "high": 100.0, "low": 98.5, "close": 99.5, "volume": 1000},
+            {"datetime_parsed": pd.Timestamp("2026-08-28 10:01"), "open": 99.6, "high": 100.2, "low": 99.5, "close": 99.8, "volume": 1200},
+        ])
+
+        result = evaluate_confirmation(setup, df, max_adverse_atr=2.0)
+        text = format_confirmation_check(setup, result)
+
+        self.assertIn("[B] Confirmation Check | TEST", text)
+        self.assertIn("Trigger Cross  : FAIL", text)
+        self.assertIn("Status         : WAITING", text)
+
+    def test_confirmation_passed_log_contains_pass_details(self):
+        setup = PendingSetupStore(Path(tempfile.mkdtemp()) / "pending.json").add_from_candidate(
+            _signal(), _candidate(), expiry_minutes=5
+        )
+        df = pd.DataFrame([
+            {"datetime_parsed": pd.Timestamp("2026-08-28 10:00"), "open": 99.0, "high": 100.0, "low": 98.5, "close": 99.5, "volume": 1000},
+            {"datetime_parsed": pd.Timestamp("2026-08-28 10:01"), "open": 99.6, "high": 101.0, "low": 99.5, "close": 100.5, "volume": 1200},
+        ])
+
+        result = evaluate_confirmation(setup, df, max_adverse_atr=2.0)
+        text = format_confirmation_passed(setup, result)
+
+        self.assertIn("[B] Confirmation PASSED | TEST", text)
+        self.assertIn("Trigger Cross : PASS", text)
+        self.assertIn("Delay         :", text)
+
+    def test_pending_expired_log_contains_reason(self):
+        setup = PendingSetupStore(Path(tempfile.mkdtemp()) / "pending.json").add_from_candidate(
+            _signal(), _candidate(), expiry_minutes=5
+        )
+        setup.status = "EXPIRED"
+        setup.resolved_at = "2026-08-28T10:05:00"
+        df = pd.DataFrame([
+            {"datetime_parsed": pd.Timestamp("2026-08-28 10:00"), "open": 99.0, "high": 100.0, "low": 98.5, "close": 99.5, "volume": 1000},
+            {"datetime_parsed": pd.Timestamp("2026-08-28 10:01"), "open": 99.6, "high": 100.2, "low": 99.5, "close": 99.8, "volume": 1200},
+        ])
+        diagnostics = evaluate_confirmation(setup, df, max_adverse_atr=2.0).diagnostics
+
+        text = format_pending_expired(setup, diagnostics)
+
+        self.assertIn("[B] Pending Expired | TEST", text)
+        self.assertIn("Trigger Cross : NEVER", text)
+        self.assertIn("Reason : Trigger never crossed", text)
 
     def test_independent_accounting_and_statistics(self):
         with tempfile.TemporaryDirectory() as td:
@@ -171,6 +227,25 @@ class StrategyBTests(unittest.TestCase):
             self.assertIn("Strategy A", report)
             self.assertIn("Strategy B", report)
             self.assertIn("Cancelled=1", report)
+
+    def test_strategy_b_summary_report_contains_observability_stats(self):
+        with tempfile.TemporaryDirectory() as td:
+            b_store = PaperPositionStore(Path(td) / "b.json")
+            pending_store = PendingSetupStore(Path(td) / "pending.json")
+            b_store.save([])
+            setup = pending_store.add_from_candidate(_signal(), _candidate(), expiry_minutes=5)
+            mark_setup_executed(pending_store, setup, executed_price=99.0)
+            expired = pending_store.add_from_candidate(_signal(), _candidate(), expiry_minutes=5)
+            expired.status = "EXPIRED"
+            expired.resolved_at = "2026-08-28T10:05:00"
+            pending_store.replace(expired)
+
+            text = strategy_b_summary_report(compute_strategy_stats(b_store, pending_store, "2026-08-28"))
+
+            self.assertIn("Strategy B Summary", text)
+            self.assertIn("Pending Created      : 2", text)
+            self.assertIn("Confirmed            : 1", text)
+            self.assertIn("Expired              : 1", text)
 
 
 if __name__ == "__main__":
