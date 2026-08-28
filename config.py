@@ -101,6 +101,10 @@ class ExecutionConfig:
     # Sprint 4 paper-position management.
     paper_partial_exit_fraction: float = 0.50
     paper_trailing_pct: float = 0.05
+    enable_strategy_b: bool = False
+    strategy_b_pending_expiry_minutes: int = 5
+    strategy_b_monitor_interval_seconds: int = 60
+    strategy_b_max_adverse_atr_1m: float = 0.5
 
 
 @dataclass(frozen=True)
