@@ -165,7 +165,11 @@ def main() -> int:
     if ownership.orphaned_managed:
         logger.warning("Managed-position registry has %d open record(s) not present at broker; reconciliation required before LIVE mode", len(ownership.orphaned_managed))
     paper_open = paper_store.open_positions()
-    logger.info("Paper portfolio | open=%d | strategy P&L=₹%.2f | daily trades=%d/%d", len(paper_open), paper_store.strategy_pnl(), state.daily_trade_count, config.risk.max_daily_trades)
+    logger.info(
+        "Paper portfolio | open=%d | today's P&L=₹%.2f | cumulative P&L=₹%.2f | daily trades=%d/%d",
+        len(paper_open), paper_store.strategy_pnl_for_date(state.trading_date),
+        paper_store.strategy_pnl(), state.daily_trade_count, config.risk.max_daily_trades,
+    )
     logger.info("Execution path: normalized instrument master -> native Dhan security-ID quotes -> verified scoring; symbol quote fallback is diagnostics-only")
     native_diag = broker.native_dhan_diagnostic_info()
     logger.info(
@@ -253,7 +257,8 @@ def main() -> int:
                                 state_store.save(state)
 
             paper_open = paper_store.open_positions()
-            strategy_pnl = paper_store.strategy_pnl()
+            strategy_pnl = paper_store.strategy_pnl_for_date(state.trading_date)
+            cumulative_strategy_pnl = paper_store.strategy_pnl()
             if (
                 not getattr(state, "daily_loss_locked", False)
                 and strategy_pnl <= -risk.daily_loss_limit(state)
@@ -261,7 +266,7 @@ def main() -> int:
                 state.daily_loss_locked = True
                 state_store.save(state)
                 logger.error(
-                    "Daily loss circuit breaker latched | Paper P&L ₹%.2f <= -₹%.2f | new entries locked for trading date %s",
+                    "Daily loss circuit breaker latched | Today's Paper P&L ₹%.2f <= -₹%.2f | new entries locked for trading date %s",
                     strategy_pnl, risk.daily_loss_limit(state), state.trading_date,
                 )
             decision = risk.can_open_new_trade(
@@ -270,10 +275,10 @@ def main() -> int:
                 strategy_pnl=strategy_pnl,
             )
             logger.info(
-                "Scan %s | Account P&L %s | Paper P&L ₹%.2f | Paper %d/%d | External %d | Trades %d/%d | Risk=%s",
+                "Scan %s | Account P&L %s | Today's Paper P&L ₹%.2f | Cumulative Paper P&L ₹%.2f | Paper %d/%d | External %d | Trades %d/%d | Risk=%s",
                 hhmm,
                 "N/A" if pnl is None else f"₹{pnl:.2f}",
-                strategy_pnl, len(paper_open), config.risk.max_open_positions,
+                strategy_pnl, cumulative_strategy_pnl, len(paper_open), config.risk.max_open_positions,
                 ownership.external_open_count, state.daily_trade_count, config.risk.max_daily_trades, decision.reason,
             )
 

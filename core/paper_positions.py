@@ -140,6 +140,31 @@ class PaperPositionStore:
     def strategy_pnl(self) -> float:
         return float(sum(p.total_pnl for p in self.load()))
 
+    def strategy_pnl_for_date(self, trading_date: str) -> float:
+        """Return paper P&L attributable to one trading date for risk gates.
+
+        Normal Atlas paper positions are opened and force-exited on the same
+        trading date, so same-day realized and unrealized P&L are both counted.
+        Historical closed positions from prior dates are excluded.
+
+        Edge case: if a position is carried across dates, Atlas has no day-open
+        mark to isolate only the overnight/current-day change. For capital
+        protection, an open carried position contributes its current unrealized
+        P&L against original entry once it has been marked on ``trading_date``;
+        prior realized P&L on that carried trade is not counted unless the trade
+        was opened on ``trading_date``.
+        """
+        day = str(trading_date)
+        total = 0.0
+        for p in self.load():
+            opened_today = str(p.opened_at).startswith(day)
+            marked_today = str(p.last_marked_at).startswith(day)
+            if opened_today:
+                total += p.total_pnl
+            elif p.is_open and marked_today:
+                total += p.unrealized_pnl
+        return float(total)
+
     def closed_trades_today(self) -> int:
         today = datetime.now().date().isoformat()
         return sum(1 for p in self.load() if p.opened_at.startswith(today))
