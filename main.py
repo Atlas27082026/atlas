@@ -8,6 +8,7 @@ from core.logger import build_logger
 from core.risk import RiskManager
 from core.scheduler import Scheduler
 from core.state import StateStore
+from core.version import build_run_identity, startup_banner
 from core.position_ownership import ManagedPositionStore, reconcile_position_ownership
 from core.paper_positions import PaperPositionStore, manage_paper_position
 from core.journal import CsvJournal
@@ -67,15 +68,11 @@ def main() -> int:
     logger = build_logger("tradehull_pro", LOG_DIR / "tradehull_pro.log")
     strategy_settings = load_strategy_settings(BASE_DIR / "strategy.yaml")
 
-    try:
-        app_version = (BASE_DIR / "VERSION").read_text().strip()
-    except Exception:
-        app_version = "unknown"
-    logger.info("TradeHull Pro Platform v3 — Sprint 4.0 paper-position lifecycle starting")
-    logger.info("Platform version=%s", app_version)
+    run_identity = build_run_identity(config, BASE_DIR)
+    logger.info("\n%s", startup_banner(run_identity))
     logger.info("Config module=%s", __import__("config").__file__)
     logger.info("DRY_RUN=%s", config.risk.dry_run)
-    logger.info("Sprint 4.0 scope: paper entries + persistent positions + partial exits + breakeven/trailing + 15:15 square-off; NO LIVE ORDERS")
+    logger.info("RUN 4 scope: paper-only A/B research; NO LIVE ORDERS")
 
     try:
         broker = TradeHullBroker(config)
@@ -240,7 +237,7 @@ def main() -> int:
                         ),
                     )
                     logger.info("\n%s", strategy_b_summary_report(strategy_b_stats))
-                logger.info("Market closed at %s. Sprint 3 engine stopping.", hhmm)
+                logger.info("Market closed at %s. Atlas %s engine stopping.", hhmm, run_identity.version)
                 return 0
             if hhmm < config.market.market_open:
                 wait = min(30, scheduler.seconds_until_next_5m_scan())
