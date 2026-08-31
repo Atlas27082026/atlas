@@ -26,7 +26,7 @@ class RiskManager:
     def effective_trade_limits(self) -> tuple[int, int]:
         risk = self.config.risk
         execution = self.config.execution
-        research_mode = bool(risk.dry_run and getattr(risk, "paper_ignore_daily_loss_lock", False))
+        research_mode = bool(risk.dry_run)
         if research_mode:
             return (
                 int(getattr(execution, "paper_research_max_daily_trades", risk.max_daily_trades)),
