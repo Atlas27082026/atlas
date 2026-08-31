@@ -19,10 +19,16 @@ from core.strategy_c import (
 from tests.test_strategy_b import _candidate, _mtf_frames, _settings
 
 
-def _daily(prev_close=100.0, today_open=101.0):
+def _daily(prev_close=100.0):
     return pd.DataFrame([
-        {"datetime_parsed": pd.Timestamp("2026-08-27 15:30"), "open": 99.0, "high": 101.0, "low": 98.0, "close": prev_close, "volume": 1000},
-        {"datetime_parsed": pd.Timestamp("2026-08-31 09:15"), "open": today_open, "high": today_open + 1.0, "low": today_open - 1.0, "close": today_open, "volume": 1000},
+        {"datetime_parsed": pd.Timestamp("2026-08-27 15:30"), "open": 99.0, "high": 101.0, "low": 98.0, "close": prev_close - 1.0, "volume": 1000},
+        {"datetime_parsed": pd.Timestamp("2026-08-28 15:30"), "open": 99.0, "high": 101.0, "low": 98.0, "close": prev_close, "volume": 1000},
+    ])
+
+
+def _one_min_open(today_open=101.0):
+    return pd.DataFrame([
+        {"datetime_parsed": pd.Timestamp("2026-08-31 09:15"), "open": today_open, "high": today_open + 0.5, "low": today_open - 0.5, "close": today_open, "volume": 1000},
     ])
 
 
@@ -134,9 +140,10 @@ class StrategyCTests(unittest.TestCase):
     def test_market_gap_up_stock_relative_weakness(self):
         regime = evaluate_regime(
             symbol="TEST",
-            market_daily=_daily(100.0, 101.0),
-            stock_daily=_daily(100.0, 99.0),
-            stock_1m=_one_min_gap_up_pullback(),
+            market_daily=_daily(100.0),
+            market_1m=_one_min_open(101.0),
+            stock_daily=_daily(100.0),
+            stock_1m=_one_min_open(99.0),
             stock_5m=_five_min_today(),
             stock_15m=_mtf_frames("BEAR")[1],
             trading_date="2026-08-31",
@@ -149,9 +156,10 @@ class StrategyCTests(unittest.TestCase):
     def test_market_gap_down_stock_relative_strength(self):
         regime = evaluate_regime(
             symbol="TEST",
-            market_daily=_daily(100.0, 99.0),
-            stock_daily=_daily(100.0, 101.0),
-            stock_1m=_one_min_gap_up_pullback(),
+            market_daily=_daily(100.0),
+            market_1m=_one_min_open(99.0),
+            stock_daily=_daily(100.0),
+            stock_1m=_one_min_open(101.0),
             stock_5m=_five_min_today(),
             stock_15m=_mtf_frames("BULL")[1],
             trading_date="2026-08-31",

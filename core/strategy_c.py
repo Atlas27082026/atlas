@@ -176,6 +176,7 @@ def evaluate_regime(
     *,
     symbol: str,
     market_daily: pd.DataFrame,
+    market_1m: pd.DataFrame,
     stock_daily: pd.DataFrame,
     stock_1m: pd.DataFrame,
     stock_5m: pd.DataFrame,
@@ -185,8 +186,8 @@ def evaluate_regime(
 ) -> MarketRegime:
     market_prev = previous_trading_close(market_daily, trading_date)
     stock_prev = previous_trading_close(stock_daily, trading_date)
-    market_open = trading_day_open(market_daily, trading_date)
-    stock_open = trading_day_open(stock_daily, trading_date)
+    market_open = trading_day_open(market_1m, trading_date)
+    stock_open = trading_day_open(stock_1m, trading_date)
     if market_prev is None or stock_prev is None or market_open is None or stock_open is None:
         raise ValueError(f"{symbol}: insufficient daily data for Strategy C regime")
 

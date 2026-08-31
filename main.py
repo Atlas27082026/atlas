@@ -677,6 +677,28 @@ def main() -> int:
                     except Exception as exc:
                         logger.warning("[B] Pending setup monitor skipped | %s | %s", setup.symbol, exc)
 
+            strategy_c_market_daily = None
+            strategy_c_market_1m = None
+            if strategy_c_enabled:
+                try:
+                    market_reference = config.execution.strategy_c_market_reference
+                    raw_strategy_c_market_daily = broker.get_historical_data(
+                        market_reference, "INDEX", "DAY"
+                    )
+                    raw_strategy_c_market_1m = broker.get_historical_data(
+                        market_reference, "INDEX", "1"
+                    )
+                    strategy_c_market_daily = normalize_ohlcv(
+                        raw_strategy_c_market_daily, market_reference, "1d"
+                    )
+                    strategy_c_market_1m = normalize_ohlcv(
+                        raw_strategy_c_market_1m, market_reference, "1m"
+                    )
+                    c1_market = latest_completed_candle(strategy_c_market_1m, 1)
+                    strategy_c_market_1m = strategy_c_market_1m.iloc[: c1_market.index + 1].copy()
+                except Exception as exc:
+                    logger.warning("[C] Market reference data unavailable | %s | %s", config.execution.strategy_c_market_reference, exc)
+
             if strategy_c_enabled:
                 strategy_c_positions = strategy_c_paper_store.open_positions()
                 if strategy_c_positions:
@@ -768,19 +790,17 @@ def main() -> int:
                         permission = type("Permission", (), {"allowed": True, "reason": "REGIME_PERMISSION_PASS"})()
                         if trigger.triggered:
                             try:
-                                market_daily = normalize_ohlcv(
-                                    broker.get_historical_data(config.execution.strategy_c_market_reference, config.market.exchange_cash, "D"),
-                                    config.execution.strategy_c_market_reference,
-                                    "1d",
-                                )
+                                if strategy_c_market_daily is None or strategy_c_market_1m is None:
+                                    raise ValueError("market reference data unavailable for Strategy C regime")
                                 stock_daily = normalize_ohlcv(
-                                    broker.get_historical_data(setup.symbol, config.market.exchange_cash, "D"),
+                                    broker.get_historical_data(setup.symbol, config.market.exchange_cash, "DAY"),
                                     setup.symbol,
                                     "1d",
                                 )
                                 regime = evaluate_regime(
                                     symbol=setup.symbol,
-                                    market_daily=market_daily,
+                                    market_daily=strategy_c_market_daily,
+                                    market_1m=strategy_c_market_1m,
                                     stock_daily=stock_daily,
                                     stock_1m=df1,
                                     stock_5m=df5_setup,
@@ -964,17 +984,18 @@ def main() -> int:
                         try:
                             c_setup = evaluate_strategy_c_setup(symbol, df5, df15, hhmm, strategy_settings)
                             if c_setup.decision != "NONE":
+                                if strategy_c_market_daily is None or strategy_c_market_1m is None:
+                                    raise ValueError("market reference data unavailable for Strategy C regime")
                                 raw1_c = broker.get_historical_data(symbol, config.market.exchange_cash, "1")
-                                raw_daily_market = broker.get_historical_data(config.execution.strategy_c_market_reference, config.market.exchange_cash, "D")
-                                raw_daily_stock = broker.get_historical_data(symbol, config.market.exchange_cash, "D")
+                                raw_daily_stock = broker.get_historical_data(symbol, config.market.exchange_cash, "DAY")
                                 df1_c = normalize_ohlcv(raw1_c, symbol, "1m")
                                 c1_c = latest_completed_candle(df1_c, 1)
                                 df1_c = df1_c.iloc[: c1_c.index + 1].copy()
-                                market_daily = normalize_ohlcv(raw_daily_market, config.execution.strategy_c_market_reference, "1d")
                                 stock_daily = normalize_ohlcv(raw_daily_stock, symbol, "1d")
                                 regime = evaluate_regime(
                                     symbol=symbol,
-                                    market_daily=market_daily,
+                                    market_daily=strategy_c_market_daily,
+                                    market_1m=strategy_c_market_1m,
                                     stock_daily=stock_daily,
                                     stock_1m=df1_c,
                                     stock_5m=df5,
