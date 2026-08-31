@@ -75,6 +75,101 @@ def _entry_trigger_summary(result):
     return " | ".join(parts[:3])
 
 
+def _has_usable_security_quote(payload, security_ids):
+    for security_id in security_ids:
+        quote = parse_quote_response(payload, str(security_id))
+        if quote.ltp is not None or quote.bid is not None or quote.ask is not None:
+            return True
+    return False
+
+
+def get_cached_security_quote_payload(
+    *,
+    logger,
+    broker,
+    security_ids,
+    exchange_segment,
+    quote_cache,
+    symbol="",
+    cache_label="quote cache",
+    config=None,
+    native_quote_debug_state=None,
+):
+    ids = [str(security_id).strip() for security_id in security_ids if str(security_id).strip()]
+    segment = str(exchange_segment or "").strip()
+    if not ids or not segment:
+        return {}
+
+    quote_cache_key = (segment, tuple(ids))
+    log_symbol = symbol or "security quote"
+    if quote_cache is not None and quote_cache_key in quote_cache:
+        logger.info(
+            "%s %s HIT | segment=%s | contracts=%d",
+            log_symbol, cache_label, segment, len(ids),
+        )
+        return quote_cache[quote_cache_key]
+
+    logger.info(
+        "%s %s MISS | segment=%s | contracts=%d",
+        log_symbol, cache_label, segment, len(ids),
+    )
+    payload = broker.get_quote_data_by_security_ids(ids, exchange_segment=segment)
+    if quote_cache is not None and _has_usable_security_quote(payload, ids):
+        quote_cache[quote_cache_key] = payload
+
+    debug_done = bool((native_quote_debug_state or {}).get("done", False))
+    if config is not None and config.execution.native_quote_diagnostics and (
+        not config.execution.native_quote_diagnostics_once or not debug_done
+    ):
+        raw = repr(payload)
+        max_chars = int(config.execution.native_quote_diagnostics_max_chars)
+        if len(raw) > max_chars:
+            raw = raw[:max_chars] + "...<truncated>"
+        logger.debug(
+            "NATIVE_QUOTE_DEBUG | symbol=%s | segment=%s | requested_ids=%s | response_type=%s | raw=%s",
+            symbol, segment, ids, type(payload).__name__, raw,
+        )
+        if native_quote_debug_state is not None:
+            native_quote_debug_state["done"] = True
+
+    return payload
+
+
+def get_paper_mtm_quote_payloads(*, logger, broker, position_groups):
+    ids_by_segment = {}
+    seen_by_segment = {}
+    for positions in position_groups:
+        for position in positions:
+            segment = str(getattr(position, "exchange_segment", "") or "").strip()
+            security_id = str(getattr(position, "security_id", "") or "").strip()
+            if not segment or not security_id:
+                continue
+            ids_by_segment.setdefault(segment, [])
+            seen_by_segment.setdefault(segment, set())
+            if security_id not in seen_by_segment[segment]:
+                ids_by_segment[segment].append(security_id)
+                seen_by_segment[segment].add(security_id)
+
+    payloads = {}
+    for segment, ids in ids_by_segment.items():
+        try:
+            logger.info(
+                "Paper MTM aggregate quote MISS | segment=%s | contracts=%d",
+                segment, len(ids),
+            )
+            payload = broker.get_quote_data_by_security_ids(ids, exchange_segment=segment)
+            if _has_usable_security_quote(payload, ids):
+                payloads[segment] = payload
+            else:
+                logger.warning(
+                    "Paper MTM aggregate quote unusable | segment=%s | contracts=%d",
+                    segment, len(ids),
+                )
+        except Exception as exc:
+            logger.warning("Paper MTM quote failed | segment=%s | error=%s", segment, exc)
+    return payloads
+
+
 def _select_best_contract(
     *,
     logger,
@@ -119,41 +214,18 @@ def _select_best_contract(
     if len(quote_segments) > 1:
         logger.warning("%s resolver returned mixed quote segments: %s; execution fails closed", symbol, quote_segments)
     if security_ids and quote_segment:
-        quote_cache_key = (
-            quote_segment,
-            tuple(str(security_id) for security_id in security_ids),
-        )
         try:
-            if quote_cache is not None and quote_cache_key in quote_cache:
-                security_quote_payload = quote_cache[quote_cache_key]
-                logger.info(
-                    "%s quote cache HIT | segment=%s | contracts=%d",
-                    symbol, quote_segment, len(security_ids),
-                )
-            else:
-                logger.info(
-                    "%s quote cache MISS | segment=%s | contracts=%d",
-                    symbol, quote_segment, len(security_ids),
-                )
-                security_quote_payload = broker.get_quote_data_by_security_ids(
-                    security_ids, exchange_segment=quote_segment
-                )
-                if quote_cache is not None:
-                    quote_cache[quote_cache_key] = security_quote_payload
-                debug_done = bool((native_quote_debug_state or {}).get("done", False))
-                if config.execution.native_quote_diagnostics and (
-                    not config.execution.native_quote_diagnostics_once or not debug_done
-                ):
-                    raw = repr(security_quote_payload)
-                    max_chars = int(config.execution.native_quote_diagnostics_max_chars)
-                    if len(raw) > max_chars:
-                        raw = raw[:max_chars] + "...<truncated>"
-                    logger.debug(
-                        "NATIVE_QUOTE_DEBUG | symbol=%s | segment=%s | requested_ids=%s | response_type=%s | raw=%s",
-                        symbol, quote_segment, security_ids, type(security_quote_payload).__name__, raw,
-                    )
-                    if native_quote_debug_state is not None:
-                        native_quote_debug_state["done"] = True
+            security_quote_payload = get_cached_security_quote_payload(
+                logger=logger,
+                broker=broker,
+                security_ids=security_ids,
+                exchange_segment=quote_segment,
+                quote_cache=quote_cache,
+                symbol=symbol,
+                cache_label="quote cache",
+                config=config,
+                native_quote_debug_state=native_quote_debug_state,
+            )
         except Exception as exc:
             debug_done = bool((native_quote_debug_state or {}).get("done", False))
             if config.execution.native_quote_diagnostics and (
@@ -473,17 +545,19 @@ def main() -> int:
 
             # Sprint 4: mark and manage all open paper positions before evaluating new entries.
             paper_positions = paper_store.open_positions()
+            strategy_b_positions = strategy_b_paper_store.open_positions() if strategy_b_enabled else []
+            strategy_c_positions = strategy_c_paper_store.open_positions() if strategy_c_enabled else []
+            paper_mtm_payloads = get_paper_mtm_quote_payloads(
+                logger=logger,
+                broker=broker,
+                position_groups=(paper_positions, strategy_b_positions, strategy_c_positions),
+            )
             if paper_positions:
                 by_segment = {}
                 for pp in paper_positions:
                     by_segment.setdefault(pp.exchange_segment, []).append(pp)
                 for segment, rows in by_segment.items():
-                    ids = [p.security_id for p in rows if p.security_id]
-                    payload = {}
-                    try:
-                        payload = broker.get_quote_data_by_security_ids(ids, exchange_segment=segment) if ids else {}
-                    except Exception as exc:
-                        logger.warning("%sPaper MTM quote failed | segment=%s | error=%s", strategy_a_log_prefix, segment, exc)
+                    payload = paper_mtm_payloads.get(str(segment or "").strip(), {})
                     for pp in rows:
                         quote = parse_quote_response(payload, pp.security_id)
                         mark = quote.bid if quote.bid is not None and quote.bid > 0 else quote.ltp
@@ -516,18 +590,12 @@ def main() -> int:
                                 state_store.save(state)
 
             if strategy_b_enabled:
-                strategy_b_positions = strategy_b_paper_store.open_positions()
                 if strategy_b_positions:
                     by_segment = {}
                     for pp in strategy_b_positions:
                         by_segment.setdefault(pp.exchange_segment, []).append(pp)
                     for segment, rows in by_segment.items():
-                        ids = [p.security_id for p in rows if p.security_id]
-                        payload = {}
-                        try:
-                            payload = broker.get_quote_data_by_security_ids(ids, exchange_segment=segment) if ids else {}
-                        except Exception as exc:
-                            logger.warning("[B] Paper MTM quote failed | segment=%s | error=%s", segment, exc)
+                        payload = paper_mtm_payloads.get(str(segment or "").strip(), {})
                         for pp in rows:
                             quote = parse_quote_response(payload, pp.security_id)
                             mark = quote.bid if quote.bid is not None and quote.bid > 0 else quote.ltp
@@ -719,18 +787,12 @@ def main() -> int:
                     logger.warning("[C] Market reference data unavailable | %s | %s", config.execution.strategy_c_market_reference, exc)
 
             if strategy_c_enabled:
-                strategy_c_positions = strategy_c_paper_store.open_positions()
                 if strategy_c_positions:
                     by_segment = {}
                     for pp in strategy_c_positions:
                         by_segment.setdefault(pp.exchange_segment, []).append(pp)
                     for segment, rows in by_segment.items():
-                        ids = [p.security_id for p in rows if p.security_id]
-                        payload = {}
-                        try:
-                            payload = broker.get_quote_data_by_security_ids(ids, exchange_segment=segment) if ids else {}
-                        except Exception as exc:
-                            logger.warning("[C] Paper MTM quote failed | segment=%s | error=%s", segment, exc)
+                        payload = paper_mtm_payloads.get(str(segment or "").strip(), {})
                         for pp in rows:
                             quote = parse_quote_response(payload, pp.security_id)
                             mark = quote.bid if quote.bid is not None and quote.bid > 0 else quote.ltp

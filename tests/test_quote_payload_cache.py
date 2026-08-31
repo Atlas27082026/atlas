@@ -6,7 +6,12 @@ from types import SimpleNamespace
 sys.modules.setdefault("talib", types.SimpleNamespace())
 
 from execution.models import ContractCandidate, ExecutionCandidate, LiquidityAssessment
-from main import _select_best_contract
+from execution.quote_parser import parse_quote_response
+from main import (
+    _select_best_contract,
+    get_cached_security_quote_payload,
+    get_paper_mtm_quote_payloads,
+)
 
 
 class _Logger:
@@ -21,11 +26,14 @@ class _Logger:
 
 
 class _Broker:
-    def __init__(self):
+    def __init__(self, payload=None):
         self.quote_calls = []
+        self.payload = payload
 
     def get_quote_data_by_security_ids(self, security_ids, exchange_segment):
         self.quote_calls.append((tuple(str(s) for s in security_ids), exchange_segment))
+        if self.payload is not None:
+            return self.payload
         return {
             "status": "success",
             "data": {
@@ -131,6 +139,10 @@ def _contract(security_id):
     )
 
 
+def _position(security_id, exchange_segment="NSE_FNO"):
+    return SimpleNamespace(security_id=str(security_id), exchange_segment=exchange_segment)
+
+
 def _select(contracts, broker, scorer, selector, quote_cache, capital):
     return _select_best_contract(
         logger=_Logger(),
@@ -177,6 +189,34 @@ class QuotePayloadCacheTests(unittest.TestCase):
 
         self.assertEqual(len(broker.quote_calls), 2)
 
+    def test_unusable_payload_is_not_cached(self):
+        broker = _Broker(payload={"status": "success", "data": {"NSE_FNO": {}}})
+        quote_cache = {}
+
+        first = get_cached_security_quote_payload(
+            logger=_Logger(),
+            broker=broker,
+            security_ids=["1001", "1002"],
+            exchange_segment="NSE_FNO",
+            quote_cache=quote_cache,
+            symbol="[A] Paper MTM",
+            cache_label="paper quote cache",
+        )
+        second = get_cached_security_quote_payload(
+            logger=_Logger(),
+            broker=broker,
+            security_ids=["1001", "1002"],
+            exchange_segment="NSE_FNO",
+            quote_cache=quote_cache,
+            symbol="[B] Paper MTM",
+            cache_label="paper quote cache",
+        )
+
+        self.assertEqual(first, {"status": "success", "data": {"NSE_FNO": {}}})
+        self.assertEqual(second, {"status": "success", "data": {"NSE_FNO": {}}})
+        self.assertEqual(len(broker.quote_calls), 2)
+        self.assertEqual(quote_cache, {})
+
     def test_cached_payload_still_runs_strategy_specific_scoring_and_sizing(self):
         broker = _Broker()
         scorer = _Scorer()
@@ -193,6 +233,82 @@ class QuotePayloadCacheTests(unittest.TestCase):
         self.assertEqual(selector.build_capitals, [10000.0, 10000.0, 25000.0, 25000.0])
         self.assertEqual(first.quantity, 10000)
         self.assertEqual(second.quantity, 25000)
+
+    def test_contract_selection_payload_reuses_existing_cache_key(self):
+        broker = _Broker()
+        scorer = _Scorer()
+        selector = _Selector()
+        quote_cache = {}
+        contracts = [_contract("1001"), _contract("1002")]
+
+        _select(contracts, broker, scorer, selector, quote_cache, 10000.0)
+        payload = get_cached_security_quote_payload(
+            logger=_Logger(),
+            broker=broker,
+            security_ids=["1001", "1002"],
+            exchange_segment="NSE_FNO",
+            quote_cache=quote_cache,
+            symbol="[A] Paper MTM",
+            cache_label="paper quote cache",
+        )
+
+        self.assertEqual(len(broker.quote_calls), 1)
+        self.assertEqual(payload, next(iter(quote_cache.values())))
+
+    def test_paper_mtm_overlapping_strategy_ids_make_one_segment_call(self):
+        broker = _Broker()
+
+        payloads = get_paper_mtm_quote_payloads(
+            logger=_Logger(),
+            broker=broker,
+            position_groups=(
+                [_position("1001"), _position("1002")],
+                [_position("1002"), _position("1003")],
+                [_position("1001"), _position("1004")],
+            ),
+        )
+
+        self.assertEqual(broker.quote_calls, [(("1001", "1002", "1003", "1004"), "NSE_FNO")])
+        shared_payload = payloads["NSE_FNO"]
+        for security_id in ("1001", "1002", "1003", "1004"):
+            quote = parse_quote_response(shared_payload, security_id)
+            mark = quote.bid if quote.bid is not None and quote.bid > 0 else quote.ltp
+            self.assertEqual(mark, 99.5)
+
+    def test_paper_mtm_two_segments_make_two_quote_calls(self):
+        broker = _Broker()
+
+        payloads = get_paper_mtm_quote_payloads(
+            logger=_Logger(),
+            broker=broker,
+            position_groups=(
+                [_position("1001", "NSE_FNO")],
+                [_position("2001", "BSE_FNO")],
+                [_position("1002", "NSE_FNO"), _position("2001", "BSE_FNO")],
+            ),
+        )
+
+        self.assertEqual(
+            broker.quote_calls,
+            [(("1001", "1002"), "NSE_FNO"), (("2001",), "BSE_FNO")],
+        )
+        self.assertEqual(set(payloads), {"NSE_FNO", "BSE_FNO"})
+
+    def test_paper_mtm_unusable_payload_is_not_shared(self):
+        broker = _Broker(payload={"status": "success", "data": {"NSE_FNO": {}}})
+
+        payloads = get_paper_mtm_quote_payloads(
+            logger=_Logger(),
+            broker=broker,
+            position_groups=(
+                [_position("1001")],
+                [_position("1002")],
+                [_position("1001")],
+            ),
+        )
+
+        self.assertEqual(broker.quote_calls, [(("1001", "1002"), "NSE_FNO")])
+        self.assertEqual(payloads, {})
 
 
 if __name__ == "__main__":
