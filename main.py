@@ -93,6 +93,7 @@ def _select_best_contract(
     underlying_price,
     log_prefix="",
     native_quote_debug_state=None,
+    quote_cache=None,
 ):
     contracts = []
     if resolver is not None:
@@ -118,24 +119,41 @@ def _select_best_contract(
     if len(quote_segments) > 1:
         logger.warning("%s resolver returned mixed quote segments: %s; execution fails closed", symbol, quote_segments)
     if security_ids and quote_segment:
+        quote_cache_key = (
+            quote_segment,
+            tuple(str(security_id) for security_id in security_ids),
+        )
         try:
-            security_quote_payload = broker.get_quote_data_by_security_ids(
-                security_ids, exchange_segment=quote_segment
-            )
-            debug_done = bool((native_quote_debug_state or {}).get("done", False))
-            if config.execution.native_quote_diagnostics and (
-                not config.execution.native_quote_diagnostics_once or not debug_done
-            ):
-                raw = repr(security_quote_payload)
-                max_chars = int(config.execution.native_quote_diagnostics_max_chars)
-                if len(raw) > max_chars:
-                    raw = raw[:max_chars] + "...<truncated>"
-                logger.debug(
-                    "NATIVE_QUOTE_DEBUG | symbol=%s | segment=%s | requested_ids=%s | response_type=%s | raw=%s",
-                    symbol, quote_segment, security_ids, type(security_quote_payload).__name__, raw,
+            if quote_cache is not None and quote_cache_key in quote_cache:
+                security_quote_payload = quote_cache[quote_cache_key]
+                logger.info(
+                    "%s quote cache HIT | segment=%s | contracts=%d",
+                    symbol, quote_segment, len(security_ids),
                 )
-                if native_quote_debug_state is not None:
-                    native_quote_debug_state["done"] = True
+            else:
+                logger.info(
+                    "%s quote cache MISS | segment=%s | contracts=%d",
+                    symbol, quote_segment, len(security_ids),
+                )
+                security_quote_payload = broker.get_quote_data_by_security_ids(
+                    security_ids, exchange_segment=quote_segment
+                )
+                if quote_cache is not None:
+                    quote_cache[quote_cache_key] = security_quote_payload
+                debug_done = bool((native_quote_debug_state or {}).get("done", False))
+                if config.execution.native_quote_diagnostics and (
+                    not config.execution.native_quote_diagnostics_once or not debug_done
+                ):
+                    raw = repr(security_quote_payload)
+                    max_chars = int(config.execution.native_quote_diagnostics_max_chars)
+                    if len(raw) > max_chars:
+                        raw = raw[:max_chars] + "...<truncated>"
+                    logger.debug(
+                        "NATIVE_QUOTE_DEBUG | symbol=%s | segment=%s | requested_ids=%s | response_type=%s | raw=%s",
+                        symbol, quote_segment, security_ids, type(security_quote_payload).__name__, raw,
+                    )
+                    if native_quote_debug_state is not None:
+                        native_quote_debug_state["done"] = True
         except Exception as exc:
             debug_done = bool((native_quote_debug_state or {}).get("done", False))
             if config.execution.native_quote_diagnostics and (
@@ -406,6 +424,7 @@ def main() -> int:
     processed_candles = {}
     try:
         while True:
+            quote_cache = {}
             now = datetime.now()
             hhmm = now.strftime("%H:%M")
             if hhmm > config.market.market_close:
@@ -960,6 +979,7 @@ def main() -> int:
                                         underlying_price=float(mtf_setup.metrics["close_5m"]),
                                         log_prefix="[B] ",
                                         native_quote_debug_state=native_quote_debug_state,
+                                        quote_cache=quote_cache,
                                     )
                                     if best_b is None:
                                         logger.info("[B] MTF setup skipped | %s | NO_EXECUTABLE_CONTRACT", symbol)
@@ -1058,6 +1078,7 @@ def main() -> int:
                                             underlying_price=float(c_setup.metrics["close_5m"]),
                                             log_prefix="[C] ",
                                             native_quote_debug_state=native_quote_debug_state,
+                                            quote_cache=quote_cache,
                                         )
                                         if best_c is None:
                                             logger.info("[C] MTF setup skipped | %s | NO_EXECUTABLE_CONTRACT", symbol)
@@ -1134,6 +1155,7 @@ def main() -> int:
                         underlying_price=float(result.metrics["close_5m"]),
                         log_prefix=strategy_a_log_prefix,
                         native_quote_debug_state=native_quote_debug_state,
+                        quote_cache=quote_cache,
                     )
                     if best is None:
                         logger.info("%s%s: no contract passed verified-data execution threshold", strategy_a_log_prefix, symbol)
