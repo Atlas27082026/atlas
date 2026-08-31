@@ -225,7 +225,7 @@ def main() -> int:
     logger.info("\n%s", startup_banner(run_identity))
     logger.info("Config module=%s", __import__("config").__file__)
     logger.info("DRY_RUN=%s", config.risk.dry_run)
-    logger.info("RUN 4 scope: paper-only A/B research; NO LIVE ORDERS")
+    logger.info("RUN 5 scope: paper-only A/B/C research; NO LIVE ORDERS")
 
     try:
         broker = TradeHullBroker(config)
